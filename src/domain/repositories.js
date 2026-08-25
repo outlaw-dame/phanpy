@@ -17,6 +17,10 @@
 /** @typedef {import('./model.js').LiveSubscription} LiveSubscription */
 /** @typedef {import('./model.js').MutationContext} MutationContext */
 /** @typedef {import('./model.js').LiveSourceKind} LiveSourceKind */
+/** @typedef {import('./model.js').DomainCapability} DomainCapability */
+/** @typedef {import('./model.js').PostDraft} PostDraft */
+/** @typedef {import('./model.js').PollDraft} PollDraft */
+/** @typedef {import('./model.js').PollVoteInput} PollVoteInput */
 
 /**
  * @typedef {Object} SessionRepository
@@ -24,7 +28,7 @@
  * @property {(input: object) => Promise<DomainSession>} login
  * @property {() => Promise<void>} logout
  * @property {() => Promise<DomainSession|null>} current
- * @property {() => Promise<string[]>} capabilities
+ * @property {() => Promise<DomainCapability[]>} capabilities Provider wire capability identifiers must be normalized here.
  */
 
 /**
@@ -77,10 +81,16 @@
  * Every canonical mutation takes MutationContext. `clientOperationId` is created
  * before the first network attempt and reused for all retries; adapters MUST NOT
  * silently retry without it.
+ *
+ * Quote creation is expressed by `PostDraft.quoteOfKey`. Polls are separate
+ * product-level operations because the canonical protocol layer models PollCreate
+ * and PollVoteAdd separately from ordinary posts.
  * @typedef {Object} MutationRepository
- * @property {(input: object, context: MutationContext) => Promise<DomainPost>} createPost
- * @property {(postKey: string, input: object, context: MutationContext) => Promise<DomainPost>} editPost
+ * @property {(input: PostDraft, context: MutationContext) => Promise<DomainPost>} createPost
+ * @property {(postKey: string, input: PostDraft, context: MutationContext) => Promise<DomainPost>} editPost
  * @property {(postKey: string, context: MutationContext) => Promise<void>} deletePost
+ * @property {(input: PollDraft, context: MutationContext) => Promise<DomainPost>} createPoll
+ * @property {(input: PollVoteInput, context: MutationContext) => Promise<DomainPost|null>} votePoll
  * @property {(postKey: string, context: MutationContext) => Promise<DomainPost>} like
  * @property {(postKey: string, context: MutationContext) => Promise<DomainPost>} unlike
  * @property {(postKey: string, context: MutationContext) => Promise<DomainPost>} repost
@@ -180,6 +190,8 @@ export const REPOSITORY_METHODS = Object.freeze({
     'createPost',
     'editPost',
     'deletePost',
+    'createPoll',
+    'votePoll',
     'like',
     'unlike',
     'repost',
