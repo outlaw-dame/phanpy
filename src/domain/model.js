@@ -241,10 +241,18 @@ export function domainKey(value) {
   if ('key' in value && typeof value.key === 'string' && value.key.trim()) {
     return value.key.trim();
   }
-  if ('stableId' in value && typeof value.stableId === 'string' && value.stableId.trim()) {
+  if (
+    'stableId' in value &&
+    typeof value.stableId === 'string' &&
+    value.stableId.trim()
+  ) {
     return value.stableId.trim();
   }
-  if ('canonicalUri' in value && typeof value.canonicalUri === 'string' && value.canonicalUri.trim()) {
+  if (
+    'canonicalUri' in value &&
+    typeof value.canonicalUri === 'string' &&
+    value.canonicalUri.trim()
+  ) {
     return value.canonicalUri.trim();
   }
 
