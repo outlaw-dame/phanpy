@@ -1,7 +1,10 @@
 import { expect, test } from '@playwright/test';
 
 import {
+  DOMAIN_CAPABILITIES,
   domainKey,
+  hasDomainCapability,
+  isDomainCapability,
   isPublicVisibility,
   mutationOperationId,
 } from '../src/domain/model.js';
@@ -61,6 +64,32 @@ test.describe('domain model contracts', () => {
       mutationOperationId({ clientOperationId: 'x'.repeat(257) }),
     ).toThrow('clientOperationId exceeds 256 characters');
   });
+
+  test('keeps provider capability strings out of product feature checks', () => {
+    expect(isDomainCapability(DOMAIN_CAPABILITIES.QUOTE_CREATE)).toBe(true);
+    expect(isDomainCapability(DOMAIN_CAPABILITIES.POLL_CREATE)).toBe(true);
+    expect(isDomainCapability('provider.account.provisioning')).toBe(false);
+    expect(isDomainCapability('social.poll.create')).toBe(false);
+
+    const session = {
+      capabilities: [
+        DOMAIN_CAPABILITIES.POST_CREATE,
+        DOMAIN_CAPABILITIES.PUBLIC_REALTIME,
+      ],
+    };
+    expect(
+      hasDomainCapability(session, DOMAIN_CAPABILITIES.POST_CREATE),
+    ).toBe(true);
+    expect(
+      hasDomainCapability(session, DOMAIN_CAPABILITIES.POLL_CREATE),
+    ).toBe(false);
+    expect(
+      hasDomainCapability(
+        [DOMAIN_CAPABILITIES.POLL_VOTE],
+        DOMAIN_CAPABILITIES.POLL_VOTE,
+      ),
+    ).toBe(true);
+  });
 });
 
 test.describe('repository contracts', () => {
@@ -109,6 +138,20 @@ test.describe('repository contracts', () => {
     delete repositories.relationships.acceptFollow;
     expect(() => assertRepositorySet(repositories)).toThrow(
       'relationships repository is missing acceptFollow()',
+    );
+  });
+
+  test('requires explicit poll mutation methods', () => {
+    const repositories = makeRepositorySet();
+    delete repositories.mutations.createPoll;
+    expect(() => assertRepositorySet(repositories)).toThrow(
+      'mutations repository is missing createPoll()',
+    );
+
+    const second = makeRepositorySet();
+    delete second.mutations.votePoll;
+    expect(() => assertRepositorySet(second)).toThrow(
+      'mutations repository is missing votePoll()',
     );
   });
 
