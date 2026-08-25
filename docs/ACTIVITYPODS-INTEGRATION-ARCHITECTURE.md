@@ -2,61 +2,105 @@
 
 ## Status
 
-Phase 0 architecture baseline. This document defines the responsibility boundaries that must be preserved while adapting Phanpy into a first-class application of the ActivityPods + Mastopod federation architecture.
-
-The three repositories that jointly define the implementation are:
+Phase 0 architecture baseline, corrected against current implementation in:
 
 - `outlaw-dame/phanpy`
 - `outlaw-dame/activity-pods`
 - `outlaw-dame/mastopod-federation-architecture`
 
-This document must be updated when implementation proves any assumption wrong.
+The implementation-level evidence and current classifications live in `ACTIVITYPODS-PHASE0-CONTRACT-AUDIT.md`.
 
 ## Core principle
 
-Phanpy must not treat ActivityPods as a Mastodon-compatible REST server, and it must not bypass the wider federation/query architecture by reconstructing every feed directly from Pod inbox/outbox collections.
+Phanpy must become an ActivityPods application by adapting to the real ActivityPods + Mastopod architecture, not by pretending ActivityPods is a Mastodon REST server and not by rebuilding infrastructure the architecture already has.
 
-The target system is split into four client-facing concerns:
+The browser should depend on protocol-neutral application contracts. ActivityPods and Mastopod remain responsible for authority, federation, public projections, feed execution, hydration, and event delivery.
 
-1. **Authority plane — ActivityPods Core**
-   - canonical identity and WebID
-   - Solid-OIDC session and application grants
-   - Pod-owned/private resources
-   - canonical social mutations
-   - signing authority and policy-bearing writes
+## Responsibility planes
 
-2. **Public read plane — Mastopod Tier 3**
-   - public timeline/query services
-   - OpenSearch-backed public search and discovery
-   - hydration of indexed public objects
-   - materialized feed/query execution
+### 1. ActivityPods authority plane
 
-3. **Public live plane — Durable Streams projection**
-   - resumable browser-facing live delivery
-   - offset-based catch-up after disconnect/backgrounding
-   - feed-specific or query-specific event projection
-   - downstream of RedPanda; never authoritative
+ActivityPods owns:
 
-4. **Pod/private live plane — Solid Notifications**
-   - private inbox/Pod resource changes
-   - collection and feed-definition changes
-   - preference/portable-state synchronization
+- canonical local account identity and WebID;
+- application registration/grants and Pod authorization;
+- Pod/private resources;
+- relationship and social mutation authority;
+- inbox/outbox authority;
+- recipient route resolution before federation handoff;
+- local user key custody and delegated signing;
+- collections and other user-owned semantic resources.
 
-RedPanda remains the backend durable event log. Redis Streams remain transient work queues. OpenSearch remains a rebuildable public-query projection. Durable Streams must not become an authority or replace RedPanda.
+Phanpy must never receive private signing keys or submit sidecar federation targets directly.
+
+### 2. Mastopod public read plane
+
+The federation architecture already contains a provider feed subsystem above OpenSearch/Qdrant and RedPanda projections.
+
+Relevant current contracts include:
+
+```text
+GET  /internal/feed/definitions
+POST /internal/feed/query
+POST /internal/feed/hydrate
+POST /internal/feed/viewed
+```
+
+These are service-internal contracts today. Phanpy must access them through a browser-safe authenticated application/session boundary; it must never receive `SIDECAR_TOKEN` or provider service credentials.
+
+### 3. Mastopod public realtime plane
+
+Current `main` already contains:
+
+- `DurableStreamContracts`;
+- `DurableStreamSubscriptionService`;
+- SSE and WebSocket feed transports;
+- `FeedStreamKafkaConsumer` from RedPanda;
+- `UnifiedFeedBridge` for normalized cross-protocol public events.
+
+The current stream subsystem is realtime but **not yet replay-capable**. Startup declares `replayCapable: false`, and connection cursor state is in-process in v1.
+
+Therefore the public live work is not a greenfield Durable Streams implementation. It is completion and exposure of the existing subsystem:
+
+```text
+RedPanda durable log
+       |
+       v
+existing feed stream consumers / unified bridge
+       |
+       v
+existing SSE + WebSocket stream contract
+       |
+       +-- missing: durable seek/replay + browser-safe auth
+       |
+       v
+Phanpy LiveRepository
+```
+
+### 4. Pod/private realtime plane
+
+Private and Pod-owned state belongs on the ActivityPods/Solid Notifications side:
+
+- private/restricted inbox changes;
+- Pod resource changes;
+- collection changes;
+- portable preferences;
+- custom-feed definition changes.
+
+ActivityPub notification objects and Solid Notifications transport are separate concerns and must remain separate in the client model.
 
 ## Non-negotiable invariants
 
-- ActivityPods remains authoritative for local account state, Pod data, permissions, canonical identity, inbox acceptance, policy-bearing mutations, and key custody.
-- Public reads may be served from Tier 3 projections when suitable, but Tier 3 never becomes the source of truth.
-- Non-public content must never enter public RedPanda streams, public OpenSearch indices, or public Durable Streams projections.
-- Canonical social mutations must use the authoritative ActivityPods/protocol path.
-- Phanpy must not connect directly to Redis, RedPanda, or OpenSearch infrastructure protocols from the browser.
-- Durable Streams must expose an application-facing live contract, not raw RedPanda topic semantics.
-- Initial snapshot/query paths must work correctly before live delivery is added.
-- Live events must be replay-safe, duplicate-safe, and recoverable from a snapshot plus durable offset.
-- Phanpy UI components should depend on protocol-neutral domain types/repositories rather than `masto` response shapes.
-- Existing Mastodon support should first be moved behind those same repository contracts so the abstraction is proven before ActivityPods behavior replaces it.
-- Framework7 may be adopted selectively for interaction/navigation primitives, but Phanpy's visual/component identity remains first-class.
+- ActivityPods remains authoritative for local account state, Pod data, permissions, canonical identity, inbox acceptance, social mutations, recipient routing and key custody.
+- Public read/search/feed projections are disposable acceleration layers, not sources of truth.
+- Non-public content must never cross public RedPanda, public search, or public live-stream boundaries.
+- Browser code must never connect directly to Redis, RedPanda, OpenSearch or Qdrant.
+- Browser code must never receive `SIDECAR_TOKEN`, `ACTIVITYPODS_TOKEN`, or other service-to-service credentials.
+- Browser-supplied `viewerId` is not authority; viewer identity must be derived/bound server-side from the authenticated application session.
+- Feed snapshots must remain usable when realtime delivery is unavailable.
+- Live replay -> tail handoff must be duplicate-safe and order-safe before being called durable/resumable.
+- Existing Mastodon behavior remains a compatibility oracle during abstraction work.
+- Framework7 may be used selectively, but Phanpy's distinct component/UI identity remains first-class.
 
 ## Target client architecture
 
@@ -64,114 +108,101 @@ RedPanda remains the backend durable event log. Redis Streams remain transient w
 Phanpy UI
    |
    v
-Protocol-neutral domain layer
+Protocol-neutral domain/repository layer
    |
+   +-- SessionRepository ----------> ActivityPods / Solid auth + app grants
    +-- IdentityRepository ---------> ActivityPods authority
-   +-- MutationRepository ---------> ActivityPods authority
+   +-- RelationshipRepository -----> ActivityPods authority
+   +-- MutationRepository ---------> ActivityPods canonical social writes
    +-- PrivateDataRepository ------> ActivityPods / Pod
-   +-- FeedRepository -------------> Tier 3 query services
-   +-- SearchRepository -----------> Tier 3 + authorized Pod search
+   +-- CollectionRepository -------> ActivityPods collections
+   +-- FeedRepository -------------> browser-safe gateway -> Tier 3 feed service
+   +-- HydrationRepository --------> browser-safe gateway -> Tier 3 hydration
+   +-- SearchRepository -----------> Tier 3 public search + authorized Pod search
+   +-- NotificationRepository -----> ActivityPods notification semantics
+   +-- MediaRepository ------------> established media/blob pipeline
    +-- LiveRepository
-   |      +-- DurableStreamsSource -> public/feed live projection
-   |      +-- SolidNotificationSource -> Pod/private changes
-   +-- LocalRepository ------------> IndexedDB/memory cache only
+   |      +-- PublicLiveSource ----> browser-safe gateway -> existing SSE/WS subsystem
+   |      +-- PodLiveSource -------> Solid Notifications
+   +-- LocalRepository ------------> IndexedDB/memory only
 ```
 
-The domain layer, not page components, decides whether a particular operation uses ActivityPods, a public projection, a private authorized resource, or a live event source.
+## Public feed contract already available
 
-## Capability ownership matrix
+The current Tier 3 contract already models:
 
-This matrix is the baseline to verify against implementation during Phase 0. `TBD` means the exact existing endpoint/service contract still needs to be verified in code before implementation begins.
+- feed kinds: graph, discovery, topic, locality, notifications, custom;
+- sources: Stream1, Stream2, canonical, firehose, unified;
+- public/authenticated/internal visibility;
+- ranking: chronological, ranked, blended;
+- stable feed skeleton IDs;
+- canonical/AP object identifiers;
+- filters for tags/languages/authors;
+- pagination cursor;
+- hydration-required capability;
+- hydrated actors, content, media, engagement and provenance;
+- explicit hydration omissions such as deleted, blocked and viewer-not-allowed.
 
-| Phanpy capability | Authority/source of truth | Efficient read path | Write path | Live path | Notes |
-| --- | --- | --- | --- | --- | --- |
-| Authentication/session | ActivityPods | ActivityPods | ActivityPods OIDC/application grants | session events as needed | Replace Mastodon dynamic app registration for ActivityPods accounts |
-| Current identity | ActivityPods WebID/actor | ActivityPods | ActivityPods | Pod notification if identity metadata changes | Canonical account identity must not be inferred from a search projection |
-| Public actor profile | Actor authority | Tier 3/hydration when indexed, direct resolution fallback | ActivityPods for local self edits | Durable Streams/public projection where useful | Canonical URI is primary cross-system identifier |
-| Private profile/account state | ActivityPods | ActivityPods | ActivityPods | Solid Notifications | Never OpenSearch |
-| Individual public post | Object authority | Tier 3/hydration; direct canonical resolution fallback | ActivityPods for local mutation | Durable Streams | Preserve canonical URI and revision/provenance |
-| Individual non-public post | ActivityPods/authorized remote delivery | ActivityPods/authorized path | ActivityPods if local | Solid Notifications/private event path | Never public projections |
-| Local public feed | canonical activities | Tier 3 derived from Stream1 | n/a | Durable Streams derived from public feed projection | Do not expose RedPanda to browser |
-| Federated public feed | canonical activities | Tier 3 derived from Firehose/Stream1+2 | n/a | Durable Streams | MRF/public trust boundary already applied upstream |
-| Remote-public discovery | canonical remote public activities | Tier 3 derived from Stream2/Firehose | n/a | Durable Streams where useful | Public only |
-| Home feed — public portion | underlying canonical objects + authoritative following state | Tier 3 feed/query service | n/a | Durable Streams | Feed service must incorporate current authorized relationship criteria safely |
-| Home feed — private/restricted portion | ActivityPods inbox/authorized state | ActivityPods | n/a | Solid Notifications/private event path | Merge/dedupe with public portion by canonical IDs |
-| Following/followers | ActivityPods canonical relationship state | ActivityPods; public projection only as convenience | ActivityPods Follow/Undo | Solid/public events as appropriate | Authority wins on conflict |
-| Like/favorite | ActivityPods canonical mutation | projected interaction state may accelerate reads | ActivityPods Like/Undo | Durable Streams for public; private path otherwise | Optimistic UI requires reconciliation |
-| Boost/repost | ActivityPods canonical mutation | projected state may accelerate reads | ActivityPods Announce/Undo | Durable Streams for public | Same authority rule |
-| Reply/create post | ActivityPods canonical mutation | after publish, Tier 3 may serve public object | ActivityPods outbox/native write path | Durable Streams for public; private path otherwise | Composer must remain protocol-blind at UI boundary |
-| Edit/delete | ActivityPods canonical mutation | Tier 3 projection after propagation | ActivityPods Update/Delete | Durable Streams/tombstone projection | Tombstones/revisions must invalidate caches |
-| Notifications | ActivityPods inbox is authoritative for recipient-specific state | hybrid derived read model where safe | recipient actions through ActivityPods | Solid Notifications + public projection events | Must dedupe retries and repeated federation deliveries |
-| Search — public posts/actors/topics | canonical public sources | Tier 3/OpenSearch | n/a | optional Durable Streams for live-result surfaces | OpenSearch remains disposable/rebuildable |
-| Search — private/Pod content | ActivityPods/Pod | authorized Pod/SPARQL/local index | ActivityPods/Pod | Solid Notifications | Must never cross public search plane |
-| Media ownership/upload | ActivityPods + established media/blob architecture | media/query/CDN projection per architecture | authoritative media pipeline | processing state via appropriate service | Exact current contract TBD in Phase 0 audit |
-| Collections | ActivityPods/Pod | ActivityPods/Pod | ActivityPods/Pod | Solid Notifications | Reusable user-owned semantic primitive |
-| Custom feed definition | ActivityPods/Pod | ActivityPods/Pod | ActivityPods/Pod | Solid Notifications | Definition is user-owned; results are not materialized into the Pod by default |
-| Custom feed execution | underlying canonical public data | Tier 3 feed compiler/query service | n/a | Durable Streams per feed/query | Definitions may reference ActivityPods collections |
-| Moderation/preferences | ActivityPods/Pod + applicable platform policy | local cached projection allowed | ActivityPods/Pod | Solid Notifications | Same evaluator must apply to snapshots and live events |
-| Offline cache/read position | local device unless explicitly made portable | IndexedDB/memory | local device | local | Never authoritative |
-| Portable Phanpy preferences | ActivityPods/Pod | ActivityPods/Pod with local cache | ActivityPods/Pod | Solid Notifications | Keep only worthwhile cross-device state here |
-| Push/system notifications | recipient/application authority | application notification service | authoritative registration path | platform push | Exact contract to be audited separately |
-| App-mediated signup | ActivityPods | ActivityPods | provider provisioning capability | n/a | Later phase, not required for first ActivityPods login |
+Phanpy's domain types should derive from these protocol-neutral concepts instead of from Mastodon response DTOs.
 
-## Home-feed composition
+## Public realtime contract already available
 
-The home feed is intentionally hybrid.
+Current event envelopes contain:
 
 ```text
-ActivityPods authoritative following state
-                 |
-                 +--------------------------+
-                 |                          |
-                 v                          v
-     Tier 3 public feed query        ActivityPods private inbox
-                 |                          |
-                 v                          v
-        public followed posts        restricted/direct posts
-                 |                          |
-                 +-------------+------------+
-                               |
-                               v
-                    deterministic merge/dedupe
-                               |
-                               v
-                            Phanpy
+stream
+ eventId
+ cursor
+ occurredAt
+ schema
+ payload
 ```
 
-The merge layer must use canonical object/activity identifiers, preserve visibility, and fail closed if visibility provenance is uncertain.
+The feed Kafka consumer maps actual Kafka partition/offset information into the cursor. The unified bridge emits canonical normalized public events without performing protocol writes.
 
-## Durable Streams role
+### Required replay completion
 
-Durable Streams belongs in the public application-delivery layer after snapshot/query contracts exist.
+Before Phanpy treats this as resumable durable live delivery, Phase 9 must define and prove:
+
+1. exact Kafka partition/offset cursor semantics;
+2. bounded seek/replay from a prior cursor;
+3. retention-expired cursor behavior;
+4. snapshot fallback when replay cannot be satisfied;
+5. replay/live cutover without gaps;
+6. dedupe for a replayed event also observed live;
+7. delete/update/tombstone ordering;
+8. authorization binding for viewer-specific subscriptions;
+9. equivalent moderation/filter policy on snapshot and live paths.
+
+No new raw RedPanda-facing browser protocol should be introduced.
+
+## Hybrid home-feed composition
+
+Public followed content and private/restricted content have different trust boundaries.
 
 ```text
-RedPanda durable event logs
-       |
-       v
-feed/query projection service
-       |
-       v
-Durable Streams HTTP surface
-       |
-       v
-Phanpy LiveRepository
+ActivityPods authoritative viewer/follow state
+                  |
+          +-------+--------+
+          |                |
+          v                v
+browser-safe Tier 3     ActivityPods authorized
+public feed query       private/restricted reads
+          |                |
+          +-------+--------+
+                  |
+                  v
+         deterministic merge/dedupe
+                  |
+                  v
+               Phanpy
 ```
 
-The client should persist a last confirmed durable offset per logical stream where useful. Reconnect behavior is:
-
-1. restore/refresh the current snapshot or verify the local cached snapshot,
-2. resume from the last confirmed offset,
-3. replay missed events,
-4. deduplicate by canonical event/object identity and revision,
-5. continue live tailing.
-
-A Durable Streams outage must degrade to query/snapshot mode; it must not make the feed unknowable.
-
-Potential logical streams include local public feed, federated/public feed, actor feed, notification-safe public events, and custom-feed projections. User-specific stream authorization must be designed before exposing home/custom projections that encode private relationship state.
+The merge must preserve canonical identifiers and visibility provenance. Public query/live infrastructure must never receive restricted content simply to make the client merge easier.
 
 ## Collections and custom feeds
 
-Collections are first-class Pod-owned resources. Custom feeds are user-owned query/composition definitions that may reference those collections.
+ActivityPods collections already provide the Pod-owned membership substrate. Custom feed definitions should be portable user-owned resources that can reference those collections.
 
 ```text
 ActivityPods Pod
@@ -180,131 +211,147 @@ ActivityPods Pod
   +-- Collection: local journalists
   +-- Collection: excluded sources
   |
-  +-- CustomFeed
+  +-- CustomFeed definition
         +-- inputCollections[]
         +-- actors[]
         +-- topics/tags[]
-        +-- language[]
-        +-- includeReplies
-        +-- includeReposts
-        +-- mediaMode
+        +-- languages[]
+        +-- reply/repost/media rules
         +-- exclusions[]
-        +-- sort strategy
+        +-- ranking/sort strategy
         +-- visibility
-                 |
-                 v
-           feed compiler
-                 |
-                 v
-         Tier 3/OpenSearch
-                 |
-                 +-- initial snapshot/query
-                 +-- Durable Streams live projection
+                  |
+                  v
+       Tier 3 custom-feed provider/compiler
+                  |
+          +-------+--------+
+          |                |
+          v                v
+       snapshot          public live
+       query             projection
 ```
 
-A feed definition should be portable and user-owned. Feed results should normally be computed rather than permanently copied into the Pod.
+Feed results normally remain computed projections; the Pod stores the portable definition, not a permanent duplicate of every result.
 
 ## Framework7 boundary
 
-Framework7 is an architectural decision to test early, not a mandate to rewrite Phanpy.
+Framework7 remains an early proof, not a rewrite mandate.
 
-Candidates for selective adoption:
+Good candidates:
 
-- app/navigation shell
-- mobile page-stack behavior and swipe-back
-- sheets/popovers/panels
-- safe-area aware toolbars/navbars
-- pull-to-refresh
-- selected native-feeling transitions and interaction primitives
+- application/navigation shell;
+- mobile page stack/swipe-back;
+- sheets/popovers/panels;
+- safe-area toolbars/navbars;
+- pull-to-refresh;
+- selected native-feeling transitions.
 
-Components that should remain Phanpy-owned unless a proof demonstrates a clear gain:
+Keep Phanpy-owned unless a proof shows a concrete gain:
 
-- post/status rendering
-- thread layout
-- media presentation
-- profile content
-- composer internals
-- distinctive Phanpy visual styling
-
-The Phase 3 proof must determine whether React Router remains primary, Framework7 provides a shell around it, or Framework7 Router replaces navigation. No broad UI migration should precede that proof.
+- status/post rendering;
+- thread layout;
+- media presentation;
+- profiles;
+- composer internals;
+- distinctive visual styling.
 
 ## Implementation order
 
 ### Phase 0 — Contract reconciliation
 
-Audit all three repositories and verify the ownership matrix against current code. Record exact services/endpoints, existing feed/query/live/media contracts, and genuine gaps. No duplicated infrastructure may be introduced.
+Finish exact auth/session, mutation, feed registry/provider, moderation, Solid Notifications and media contract reconciliation. Record default-branch vs active-unmerged implementation state where relevant.
 
 ### Phase 1 — Protocol-neutral Phanpy domain model
 
-Introduce stable domain types for actors, posts, feeds, notifications, media, relationships, collections, sessions, and search results.
+Introduce stable types for session, identity, actor, post, feed skeleton, hydrated object, relationship, notification, media, collection and live envelopes.
+
+Use the verified Tier 3 feed/hydration contracts as one input; do not model the domain as Mastodon DTO aliases.
 
 ### Phase 2 — Existing Mastodon behavior behind repositories
 
-Move current `masto`-backed operations behind repository/domain interfaces while preserving behavior. This proves the abstraction before ActivityPods is introduced.
+Move current `masto` behavior behind the new repository layer without changing user-visible behavior. Add focused regression tests for feed pagination, mutations and live update/delete handling.
 
 ### Phase 3 — Framework7 boundary proof
 
-Test the smallest useful navigation/shell integration and document the chosen boundary. Avoid broad component rewrites.
+Test the smallest useful shell/navigation integration and document whether Framework7 Router, a wrapper shell, or current routing remains primary.
 
 ### Phase 4 — ActivityPods authentication and identity
 
-Implement Solid-OIDC/application grants, WebID/actor/Pod discovery, session restoration, logout/revocation, and capability resolution.
+Implement Solid-OIDC/application registration/grants, WebID/actor/Pod discovery, session restoration, logout/revocation and capability resolution.
 
 ### Phase 5 — Read-only ActivityPods social slice
 
-Implement current profile, actor profile, individual public/non-public objects as authorized, threads, outbox/profile posts, relationships, and basic private inbox reads through the new domain model.
+Implement authorized actor/object/relationship/private-inbox reads through the domain layer.
 
 ### Phase 6 — Authoritative ActivityPods social mutations
 
-Implement create/reply/follow/unfollow/like/unlike/repost/unrepost/edit/delete through ActivityPods-authoritative paths with idempotent optimistic reconciliation.
+Implement create/reply/follow/unfollow/like/unlike/repost/unrepost/edit/delete through ActivityPods canonical mutation paths. Sidecar delivery/signing remains invisible to Phanpy.
 
 ### Phase 7 — Tier 3 public read plane
 
-Wire local, federated/public, actor, topic/tag, media, and other public feed/query surfaces to existing Tier 3 contracts backed by Stream1/Stream2/Firehose/OpenSearch.
+Adapt the **existing** `src/feed/` definitions/query/hydration subsystem to a browser-safe authenticated application boundary. Do not rebuild the feed engine.
+
+Key work:
+
+- server-bound viewer identity;
+- safe public/authenticated feed exposure;
+- snapshot cursor validation;
+- hydration integration;
+- moderation/policy equivalence;
+- Phanpy Feed/Hydration repositories.
 
 ### Phase 8 — Hybrid home-feed composition
 
-Combine Tier 3 public followed-content queries with private/restricted ActivityPods inbox data. Prove no private-content leakage and deterministic dedupe/order behavior.
+Combine the public following feed with authorized private/restricted ActivityPods reads and prove visibility-safe deterministic merge/dedupe behavior.
 
-### Phase 9 — Durable Streams public live plane
+### Phase 9 — Complete durable replay and expose public realtime
 
-Add resumable, offset-based public/feed live delivery downstream of the existing event architecture. Snapshot/query behavior must remain the recovery baseline.
+Build on the **existing** SSE/WS + `FeedStreamKafkaConsumer` + `UnifiedFeedBridge` implementation.
+
+Add:
+
+- RedPanda offset replay/seek;
+- expired-cursor/snapshot fallback;
+- replay/live gap-free handoff;
+- browser-safe authentication;
+- viewer-bound authorization/filters;
+- Phanpy LiveRepository integration.
 
 ### Phase 10 — Solid Notifications for Pod/private changes
 
-Add private inbox, Pod resource, preference, collection, and feed-definition live synchronization.
+Implement private inbox/Pod resource/preference/collection/custom-feed-definition synchronization through Solid Notifications.
 
 ### Phase 11 — ActivityPods collections
 
-Make collections reusable user-owned primitives independent of custom feeds.
+Expose existing ActivityPods Collection/OrderedCollection capabilities through Phanpy's collection repository and UI.
 
 ### Phase 12 — Custom feeds
 
-Store portable definitions in the Pod, compile them into Tier 3 queries, and expose live results through Durable Streams.
+Store portable definitions in the Pod and connect them to the existing Tier 3 `custom` feed contract/provider architecture. Add collection operands and live projection behavior without duplicating collections.
 
 ### Phase 13 — Search and discovery
 
-Unify Tier 3 public search, WebFinger/actor resolution, and authorized Pod search while preserving trust boundaries.
+Expose/harden public search and combine it with actor/WebFinger resolution and authorized Pod search.
 
 ### Phase 14 — Notifications
 
-Build recipient-centric notification normalization, ordering, dedupe, read state, and live delivery across authoritative/private and safe public projections.
+Normalize recipient-centric notification semantics, read state, dedupe and live updates across ActivityPub notification objects, ActivityPods state and safe public projections.
 
 ### Phase 15 — Media
 
-Integrate the established ActivityPods/media/blob architecture for upload, metadata, processing, variants, federation attachments, retry, and deletion.
+Integrate the established ActivityPods/media/blob architecture for upload, processing, variants, attachments, retry and deletion.
 
-### Phase 16 — Moderation, filters, and safety
+### Phase 16 — Moderation, filters and safety
 
-Apply user/server policy consistently to query snapshots, hydration, search, notifications, recommendations/discovery, and Durable Streams events.
+Prove equivalent user/server policy on feed snapshots, hydration, search, notifications, public realtime and recommendations/discovery.
 
 ### Phase 17 — Offline/resilience/local cache
 
-Add IndexedDB snapshots, offsets, optimistic journals, drafts, read positions, network recovery, duplicate/out-of-order handling, and cache invalidation.
+Add IndexedDB snapshots, replay cursors, optimistic journals, drafts, read positions, duplicate/out-of-order handling and cache invalidation.
 
 ### Phase 18 — Framework7 expansion
 
-Only after functional architecture is stable, selectively expand proven Framework7 primitives without sacrificing Phanpy's visual identity.
+Expand only the Framework7 primitives that passed Phase 3 and fit stable application behavior.
 
 ### Phase 19 — Native account provisioning/onboarding
 
@@ -312,35 +359,36 @@ Expose approved ActivityPods app-mediated provisioning to reduce infrastructure 
 
 ### Phase 20 — Dual-protocol surfaces
 
-Use the already protocol-neutral domain layer to expose ATProto-backed identities, feeds, search, and interactions without another client rewrite.
+Use the protocol-neutral domain layer and existing canonical/unified architecture to expose ATProto-backed identities, feeds, search and interactions without another client rewrite.
 
 ## Cross-phase gates
 
-Every phase that changes runtime behavior must preserve these gates:
+Every runtime phase must preserve:
 
-- **authority:** writes reach the authoritative owner and cannot be silently accepted by projections;
-- **privacy:** no private/restricted resource crosses a public stream/index/live boundary;
-- **identity:** canonical URIs/IDs remain stable across normalization and projection;
-- **idempotency:** retries and replay do not duplicate user-visible state or mutations;
-- **ordering:** revisions/tombstones cannot resurrect stale state;
-- **recovery:** live state can always be reconstructed from a snapshot/query plus durable offsets/events;
-- **moderation:** snapshot and live paths apply equivalent policy;
-- **performance:** UI does not directly fan out across arbitrary remote resources when a bounded service exists;
-- **compatibility:** existing Mastodon behavior remains available until an intentional removal decision is made;
-- **observability:** each cross-plane request/event can be correlated without exposing secrets or private payloads.
+- **authority:** writes reach their true owner;
+- **privacy:** private/restricted resources never enter public projection/live paths;
+- **credential separation:** service credentials never enter browser code;
+- **viewer binding:** client-provided IDs never substitute for authenticated authority;
+- **identity:** canonical IDs survive normalization/projection;
+- **idempotency:** retry/replay cannot duplicate visible state or writes;
+- **ordering:** update/delete/tombstone ordering cannot resurrect stale state;
+- **recovery:** snapshot plus durable replay reconstructs live state;
+- **moderation:** snapshot/hydration/live apply equivalent policy;
+- **performance:** bounded provider APIs replace client fan-out where available;
+- **compatibility:** Mastodon remains functional through abstraction migration;
+- **observability:** cross-plane work is correlatable without exposing secrets/private payloads.
 
-## Phase 0 deliverables still to complete
+## Phase 0 completion gate
 
-This document establishes the target boundary, but Phase 0 is not complete until repository inspection records:
+Phase 0 ends when the remaining unknowns have concrete answers for:
 
-- every direct `masto` dependency/call family in Phanpy and its target repository interface;
-- the exact current ActivityPods frontend authentication/application-registration contract in this fork;
-- the exact existing ActivityPods collection, outbox, notification, and Pod-resource APIs we should reuse;
-- the current Tier 3 feed/query/OpenSearch endpoints and hydration contracts, if already implemented;
-- the current Stream1/Stream2/Firehose schemas and canonical identifiers relevant to client reads;
-- whether a Durable Streams server/projection already exists anywhere in the architecture or must be added;
-- current media pipeline/blob contracts and which layer owns client upload orchestration;
-- existing moderation/filter projection contracts that must be applied before exposing broad feeds;
-- exact gaps requiring new backend work before Phanpy can consume the architecture.
+- ActivityPods Solid-OIDC/session and application-grant runtime;
+- exact canonical social mutation entry points;
+- Solid Notifications browser discovery/subscription;
+- current media/blob client contract;
+- active Tier 3 feed definitions/providers and custom-feed status;
+- viewer/moderation policy enforcement around feed/hydration/live;
+- public search exposure;
+- replay implementation requirements for current `replayCapable: false` streams.
 
-Only after those are verified should Phase 1 runtime work begin.
+At that point Phase 1 can begin from verified contracts rather than assumptions.
