@@ -62,7 +62,7 @@ NotificationRepository / RelationshipRepository
   -> recipient-specific state
 ```
 
-This split now maps directly onto existing Tier 3 feed/hydration/live contracts described below.
+This split maps directly onto existing Tier 3 feed/hydration/live contracts described below.
 
 ## Verified findings — ActivityPods
 
@@ -107,7 +107,7 @@ Solid Notifications
   -> Pod/private resource change transport
 ```
 
-The client should consume the standardized Pod notification/discovery contract; it should not reproduce the application-server watcher implementation in the browser.
+The client should consume standardized Solid Notifications endpoint discovery/subscription semantics. It should not reproduce the application-server watcher implementation in the browser; that watcher is backend behavior layered on the SemApps listener.
 
 ### Canonical social writes remain ActivityPods-authoritative
 
@@ -116,47 +116,69 @@ The old app-framework `pod-outbox.post` helper preserves key custody by posting 
 The newer federation work establishes a stronger boundary:
 
 1. ActivityPods is the local actor/account authority.
-2. ActivityPods resolves recipient inbox/shared-inbox routing before durable handoff.
+2. ActivityPods resolves recipient personal/shared inbox routing before durable handoff.
 3. The sidecar receives a frozen target snapshot and does not independently rediscover recipient routes.
 4. The sidecar performs delivery using ActivityPods-delegated signatures for Pod/user actors.
 
-Therefore Phanpy mutations terminate at the ActivityPods canonical write/outbox boundary. Phanpy must never submit federation delivery targets, write Redis queues, or address sidecar delivery workers directly.
+Therefore Phanpy mutations terminate at the ActivityPods canonical write/outbox boundary. Phanpy must never submit federation delivery targets, write Redis/RedPanda infrastructure directly, or address sidecar delivery workers directly.
 
-### Current modern signing implementation is on ActivityPods PR #107, not default `master`
+### Modern ActivityPub signing authority is already on ActivityPods `master` — REUSE_AS_IS
 
-The branch `security/signing-credential-hygiene-forward-port` is currently ahead of `master` and is represented by ActivityPods PR #107.
+The previous revision of this audit incorrectly described ActivityPods PR #107 as the location of the current modern signing implementation. That conflated the existing default-branch authority model with a pending credential-hygiene hardening.
 
-That implementation registers:
+Current `master`, in `pod-provider/backend/services/signing.service.js`, already registers:
 
 ```text
 POST /api/internal/signatures/batch
 ```
 
-and uses a dedicated `ACTIVITYPODS_TOKEN` for sidecar -> ActivityPods signing authority. It validates exact local account/actor authority before RSA signing and keeps private key material inside ActivityPods.
+The endpoint is protected by the internal bearer token (`ACTIVITYPODS_TOKEN`, with the present compatibility fallback in configuration), keeps private key material inside ActivityPods, batches requests by actor, and performs authoritative local actor/key resolution before signing.
 
-The local ActivityPub authority chain is:
+The executable `master` authority chain is:
 
 ```text
 auth.account.findByWebId
+  -> require exact account.webId === actorUri and a local account username/dataset
   -> activitypub.actor.get
-  -> actor-attached public-key linkage
-  -> ActivityPods key storage
-  -> signed HTTP headers returned to sidecar
+  -> require exact returned actor id === actorUri
+  -> keys.getOrCreateWebIdKeys(RSA)
+  -> intersect with actor.publicKey linkage
+  -> require exactly one key whose owner/controller === actorUri
+  -> derive keyId from rdfs:seeAlso
+  -> return signed HTTP headers to the sidecar
 ```
 
-It rejects remote/same-host-nonlocal actors, mismatched account/actor identity, missing or ambiguous actor-controlled keys, invalid signing profiles, bad dates, malformed hosts/paths/queries, and missing signing credentials.
+This is materially different from same-host URL inference and from the obsolete `actors.resolveWebIdForActor` / `actors.getPublicKeyId` dependency chain found in older integration copies.
 
-PR #107 is still open and unmerged. Therefore:
+Current `master` also fails closed for unknown signing profiles, malformed host/path/method inputs, digest mismatches, body-size limits, and unavailable/ambiguous actor signing material. The browser has no role in this endpoint and must never receive its bearer credential or signing key material.
 
-- default-branch deployment state must still be checked when running the stack;
-- Phanpy architecture should target the modern PR #107 authority model rather than obsolete integration copies;
-- no client-facing Phanpy code should depend directly on the internal signing endpoint.
+### ActivityPods PR #107 is pending credential-hygiene hardening, not the architectural baseline
 
-### Stale signing APIs must not become Phanpy dependencies
+PR #107 (`security/signing-credential-hygiene-forward-port`) retains the same account/actor authority premise but tightens the key-resolution implementation. In particular, it removes signing-path dependence on `keys.getOrCreateWebIdKeys` and instead follows actor-attached public-key IDs through existing key storage, requiring an unambiguous actor-controlled RSA private key rather than allowing the signing path to create/recover a key opportunistically.
 
-The sidecar still contains legacy-looking ActivityPods client methods such as key-pair retrieval/signature helpers with no live current caller, and the federation repository contains an older `activitypods-integration/signing.service.js` copy using obsolete signer-locality dependencies.
+The architectural consequence for Phanpy is deliberately small:
 
-Those are implementation-history artifacts, not Phanpy contracts.
+- Phanpy targets the ActivityPods canonical mutation boundary, not either signing implementation detail;
+- PR #107 should be tracked as defense-in-depth for ActivityPods/federation deployment and integration tests;
+- Phanpy implementation must not block on PR #107 unless a concrete runtime contract it needs is changed by that PR.
+
+### Stale signing APIs and integration copies must not become Phanpy dependencies
+
+The federation repository contains an older ActivityPods integration copy of `signing.service.js` using obsolete signer-locality/key-resolution dependencies. ActivityPods `master` is already newer than that copy.
+
+The sidecar also contains legacy-looking ActivityPods client key/signature helper methods that are not the live browser-facing mutation contract. These are implementation-history/compatibility artifacts unless a current caller proves otherwise.
+
+Rule for the Phanpy integration:
+
+```text
+browser -> ActivityPods application/social mutation contract
+        -> ActivityPods authority/outbox
+        -> durable federation handoff
+        -> sidecar delivery
+        -> ActivityPods internal signing service when a Pod actor signature is required
+```
+
+Never invert this chain by making Phanpy call signing, queue, delivery, or recipient-routing internals.
 
 ## Verified findings — Mastopod federation/query architecture
 
@@ -288,6 +310,24 @@ The existing `unified` stream is especially useful for the Phanpy architecture: 
 
 It should be evaluated as the default public live substrate for Phanpy before inventing feed-specific streams.
 
+## Authority/transport ownership matrix
+
+| Concern | Browser / Phanpy | ActivityPods / SemApps | Federation sidecar |
+| --- | --- | --- | --- |
+| Session/app grant | request/use authorized session | authority + Pod/application grant | none |
+| Local actor identity | consume normalized identity | canonical authority | projection only where needed |
+| Pod CRUD/ACL | adapter calls | canonical resource/permission authority | none |
+| Social mutation intent | submit user operation | validate/apply canonical write + outbox | never accepts browser mutation intent |
+| Recipient routing | none | resolve/freeze personal/shared inbox targets | consume frozen target snapshot |
+| AP signing keys | none | sole custody + internal signing | receive signed headers only |
+| Federation delivery | none | durable handoff authority | execute outbound delivery/retries |
+| Public index/feed | consume browser-safe façade | supply authoritative local/public events | projection/query/hydration acceleration |
+| Public live | consume browser-safe SSE/WS | produce authoritative events | project/fan-out; replay to be completed |
+| Private/Pod live | Solid Notifications client adapter | Solid Notifications + authorized Pod state | no public-stream leakage |
+| User-visible AP notifications | render normalized semantics | ActivityPub/Pod notification authority | public projection only if policy permits |
+
+This matrix is the guardrail against accidental duplication. A Phanpy adapter may normalize or combine outputs, but it must not silently acquire authority owned by a backend plane.
+
 ## Corrected contract classification
 
 | Area | Classification | Owning repo / action |
@@ -297,7 +337,8 @@ It should be evaluated as the default public live substrate for Phanpy before in
 | Pod resources/permissions | `REUSE_BEHIND_ADAPTER` | ActivityPods |
 | ActivityPods collections | `REUSE_BEHIND_ADAPTER` | ActivityPods + Phanpy collection repository |
 | ActivityPods canonical social mutations | `REUSE_BEHIND_ADAPTER` | Phanpy mutation repository -> ActivityPods |
-| ActivityPods modern signing authority | `REUSE_AS_IS` after PR #107 lands | Internal only; never browser-facing |
+| ActivityPods current AP signing authority | `REUSE_AS_IS` | ActivityPods `master`; internal only, never browser-facing |
+| ActivityPods PR #107 signing hardening | `HARDEN_AND_EXPOSE` only to trusted sidecar semantics | Pending defense-in-depth; not a Phanpy client prerequisite |
 | Sidecar delivery routing/queues | `REUSE_AS_IS` | Internal only |
 | Public search indexing | `REUSE_AS_IS` | Federation architecture |
 | Provider feed contracts/service | `HARDEN_AND_EXPOSE` | Federation architecture + browser-safe gateway |
@@ -318,9 +359,9 @@ It should be evaluated as the default public live substrate for Phanpy before in
 - verify current Solid-OIDC/session frontend/runtime stack beyond the legacy React hook;
 - verify browser-appropriate application-grant/access-needs flow for Phanpy;
 - verify the exact canonical post/reply/like/announce/follow mutation entry points against the modern delivery path;
-- verify Solid Notifications discovery/subscription behavior and authorization in the current fork;
+- verify Solid Notifications endpoint discovery/subscription behavior and authorization in the current fork;
 - verify media/blob ownership and client upload contract;
-- track PR #107 landing because its signing authority is relevant to integration testing.
+- track PR #107 as signing credential-hygiene hardening, without treating it as a Phanpy client prerequisite.
 
 ### Federation/query architecture
 
@@ -330,7 +371,8 @@ It should be evaluated as the default public live substrate for Phanpy before in
 - define browser-safe gateway/session authorization around `/internal/feed/*`;
 - define and implement replay semantics for current `replayCapable: false` streams;
 - verify whether custom feed definitions already have provider/compiler support beyond the generic contract;
-- verify search HTTP exposure separately from feed/hydration exposure.
+- verify search HTTP exposure separately from feed/hydration exposure;
+- reconcile/remove or clearly quarantine stale ActivityPods signing integration copies so they cannot be mistaken for current authority.
 
 ### Phanpy
 
