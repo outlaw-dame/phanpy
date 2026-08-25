@@ -11,6 +11,7 @@
 /** @typedef {'graph'|'discovery'|'topic'|'locality'|'notifications'|'custom'|'personal'} FeedKind */
 /** @typedef {'stream1'|'stream2'|'canonical'|'firehose'|'unified'|'pod'|'mastodon'|'unknown'} FeedSource */
 /** @typedef {'deleted'|'blocked'|'viewer_not_allowed'|'not_found'|'invalid'|'unavailable'} HydrationOmissionReason */
+/** @typedef {'public'|'private_hint'|'pod'} LiveSourceKind */
 
 /**
  * Stable identity that survives projection/provider changes.
@@ -23,6 +24,14 @@
  * @property {string=} did
  * @property {string=} providerId
  * @property {ProtocolKind} protocol
+ */
+
+/**
+ * A stable mutation context is created before the first network attempt and is
+ * reused for every retry. Adapters must never silently drop this identity.
+ * @typedef {Object} MutationContext
+ * @property {string} clientOperationId
+ * @property {string=} expectedRevision Optimistic-concurrency token when supported.
  */
 
 /**
@@ -48,7 +57,7 @@
 
 /**
  * @typedef {Object} DomainMedia
- * @property {string} id
+ * @property {string} id Stable media key; canonical resource URI when available.
  * @property {'image'|'video'|'audio'|'gifv'|'file'|'unknown'} kind
  * @property {string} url
  * @property {string=} previewUrl
@@ -59,6 +68,7 @@
  * @property {number=} width
  * @property {number=} height
  * @property {number=} durationSeconds
+ * @property {string=} processingState
  */
 
 /**
@@ -145,6 +155,8 @@
  */
 
 /**
+ * Federated relationship state only. Viewer-private presentation policy is kept
+ * outside this object so adapters do not force Mastodon DTO semantics onto AP.
  * @typedef {Object} DomainRelationship
  * @property {string} actorKey
  * @property {boolean} following
@@ -157,7 +169,7 @@
 
 /**
  * @typedef {Object} DomainNotification
- * @property {string} id
+ * @property {string} id Stable notification key; canonical activity URI when available.
  * @property {'mention'|'reply'|'follow'|'follow_request'|'like'|'repost'|'poll'|'status'|'update'|'unknown'} kind
  * @property {string} createdAt
  * @property {DomainActor=} actor
@@ -204,10 +216,14 @@
  */
 
 /**
+ * `source` is semantic, not necessarily a separate socket. FEP may multiplex
+ * public and private-hint events over one connection, while Solid Notifications
+ * supplies Pod-resource events through a different transport.
  * @typedef {Object} LiveEnvelope
  * @property {string} eventId
+ * @property {LiveSourceKind} source
  * @property {string} topic
- * @property {'create'|'update'|'delete'|'activitypub'|'canonical'|'feed'|'notification'|'unknown'} event
+ * @property {'create'|'update'|'delete'|'activitypub'|'canonical'|'feed'|'notification'|'invalidate'|'unknown'} event
  * @property {string} occurredAt
  * @property {unknown} payload
  * @property {string=} cursor
@@ -257,6 +273,24 @@ export function domainKey(value) {
   }
 
   throw new TypeError('Domain identity does not contain a stable key');
+}
+
+/**
+ * Validate the client-operation identity before an adapter can perform a
+ * canonical mutation.
+ *
+ * @param {MutationContext} context
+ * @returns {string}
+ */
+export function mutationOperationId(context) {
+  const operationId = context?.clientOperationId?.trim?.();
+  if (!operationId) {
+    throw new TypeError('Mutation context requires clientOperationId');
+  }
+  if (operationId.length > 256) {
+    throw new TypeError('clientOperationId exceeds 256 characters');
+  }
+  return operationId;
 }
 
 /**
