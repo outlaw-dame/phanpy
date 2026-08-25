@@ -22,13 +22,13 @@ Historical architecture documents are not treated as runtime truth when current 
 
 ## Verified findings — Phanpy
 
-### Existing Mastodon coupling is the migration baseline, not a discovery
+### Existing Mastodon coupling is the migration baseline
 
-Phanpy is a Mastodon client. Its current API, auth, feed, live, notification, relationship, composer, media, search, profile, and model assumptions are therefore Mastodon-shaped by design.
+Phanpy is currently a Mastodon client. Its API, auth, feed, live, notification, relationship, composer, media, search, profile, and model assumptions are Mastodon-shaped by design.
 
-The useful Phase 0 task is not to rediscover that fact. It is to determine which ActivityPods and Mastopod contracts replace each Mastodon responsibility without duplicating existing infrastructure.
+The Phase 0 task is therefore to map those responsibilities to the real ActivityPods + Mastopod contracts without duplicating infrastructure.
 
-The planned client boundary remains:
+The client boundary remains:
 
 ```text
 Phanpy UI
@@ -47,36 +47,59 @@ protocol-neutral repositories
 
 Current Mastodon behavior remains the Phase 2 regression oracle while those repositories are introduced.
 
-### Home timeline separation remains necessary
+### Home timeline responsibilities must be separated
 
-The current home implementation combines snapshot pagination, polling, Mastodon streaming update/delete events, and recipient-specific state. The ActivityPods adaptation should split these responsibilities instead of translating the page line-for-line:
+The current home implementation combines snapshot pagination, polling, Mastodon streaming update/delete events, and recipient-specific state. The ActivityPods adaptation should split those responsibilities:
 
 ```text
 FeedRepository
   -> snapshot, pagination, query
 
 LiveRepository
-  -> incremental public events
+  -> incremental public events + private refresh hints
 
 NotificationRepository / RelationshipRepository
-  -> recipient-specific state
+  -> recipient-specific semantics and authoritative reads
 ```
 
-This split maps directly onto existing Tier 3 feed/hydration/live contracts described below.
+That separation maps onto contracts already present in the architecture.
 
 ## Verified findings — ActivityPods
 
-### Application registration already follows Solid interoperability semantics — REUSE_BEHIND_ADAPTER
+### Application registration uses Solid Data Interoperability semantics — REUSE_BEHIND_ADAPTER
 
-The existing application-registration flow discovers `interop:hasAuthorizationAgent`, checks the registered-agent Link relation, and redirects to `interop:hasAuthorizationRedirectEndpoint` when registration is required.
+The current ActivityPods app framework has a concrete registration/grant flow:
 
-Phanpy should implement the same protocol behavior in a Preact-compatible session adapter rather than importing the React Admin/MUI presentation layer.
+1. fetch the user's WebID/actor;
+2. discover `interop:hasAuthorizationAgent`;
+3. fetch the authorization agent;
+4. inspect the `Link` relation `interop:registeredAgent`;
+5. if no registration exists, redirect to `interop:hasAuthorizationRedirectEndpoint` with `client_id`;
+6. after registration, verify the application's required AccessNeedGroups, AccessGrants, DataGrants, and special rights.
+
+The React package implementing the existing UI is specifically React Admin/MUI (`@activitypods/react`), so Phanpy should not import that presentation layer. It should reproduce the protocol behavior in a Preact-compatible `SessionRepository`/authorization adapter.
+
+Server-side application registration is not merely a UI convention. ActivityPods receives `Create`, `Update`, and `Delete` activities for `interop:ApplicationRegistration`, verifies required grants, stores the mirrored grants, and registers backend listeners where special rights require them.
+
+### Current local auth/bootstrap is authoritative ActivityPods state — REUSE_BEHIND_ADAPTER
+
+The Pod provider uses SemApps `AuthLocalService` and an ActivityPods-owned signup/bootstrap path. Signup creates the account and WebID, provisions the ActivityPub actor, optionally provisions ATProto identity, and waits for required local resources in production, including:
+
+- authorization agent;
+- agent/auth/data registries;
+- Pod storage/preferences metadata;
+- ActivityPub actor completion;
+- type indexes.
+
+This reinforces the boundary: Phanpy can drive login/signup and app authorization, but it must not recreate account/bootstrap semantics locally.
+
+The remaining Phase 0 auth task is to select the browser implementation for Solid-OIDC/session restoration and Data Interoperability registration in Preact, not to invent a new identity system.
 
 ### Pod resources and permissions already exist — REUSE_BEHIND_ADAPTER
 
-The ActivityPods app framework already provides actor-bound Pod resource operations for GET/list/POST/PUT/PATCH/DELETE and WAC permission management with Read/Append/Write/Control modes.
+The ActivityPods app framework already provides actor-bound Pod resource operations and WAC permission management with Read/Append/Write/Control modes.
 
-Phanpy should not invent a second Pod CRUD or ACL layer.
+Phanpy should not create a second Pod CRUD or ACL model.
 
 ### Collections already exist as reusable Pod-owned resources — REUSE_BEHIND_ADAPTER
 
@@ -89,180 +112,239 @@ Phanpy should not invent a second Pod CRUD or ACL layer.
 - pagination/dereference/sort options;
 - provisioning missing attached collections.
 
-Phase 11 should therefore expose Phanpy collection semantics over this substrate. Phase 12 custom feed definitions can reference ActivityPods collection URIs rather than introducing a separate list database.
+Phase 11 should expose Phanpy collection semantics over this substrate. Phase 12 custom-feed definitions can reference ActivityPods collection URIs rather than introducing a separate list database.
 
-### ActivityPub notification objects and Solid Notifications are different concerns
+### ActivityPub notification semantics, private realtime hints, and Solid Notifications are three different concerns
 
-`pod-notification` sends application-generated ActivityPub notification activities. It is not the browser synchronization transport.
+These must not be collapsed into one mechanism.
 
-`pod-activities-watcher` uses the SemApps `solid-notifications.listener` service and registers inbox/outbox listeners when the app has the corresponding special rights.
+`pod-notification` represents application-generated ActivityPub notification semantics.
 
-Phase 10 must therefore keep these separate:
+`pod-activities-watcher` uses SemApps `solid-notifications.listener` to observe authorized inbox/outbox collection changes. It registers listeners only when the app has the corresponding `ReadInbox`/`ReadOutbox` special rights.
+
+The newer architecture also contains a principal-scoped private realtime path:
+
+```text
+ActivityPods realtime-private-emitter
+  -> Redis private pub/sub channel
+  -> sidecar FEP-3ab2 session/topic router
+  -> matching authenticated principal only
+```
+
+Its current private topics are:
+
+- `notifications`
+- `feeds/personal`
+
+Those events are refresh/invalidation hints, not a new source of truth and not public RedPanda events.
+
+The correct client split is therefore:
 
 ```text
 ActivityPub notification objects
-  -> user-visible social notification semantics
+  -> social notification semantics / authoritative data
+
+FEP-3ab2 private principal-scoped hints
+  -> low-latency notification/personal-feed refresh signaling
 
 Solid Notifications
-  -> Pod/private resource change transport
+  -> Pod/resource synchronization and authorized collection/resource change transport
 ```
 
-The client should consume standardized Solid Notifications endpoint discovery/subscription semantics. It should not reproduce the application-server watcher implementation in the browser; that watcher is backend behavior layered on the SemApps listener.
+Phanpy should consume the public browser-facing FEP stream surface for notification/feed hints when available, while using Solid Notifications for Pod-owned resource synchronization. It should not reproduce `pod-activities-watcher` in the browser.
 
-### Canonical social writes remain ActivityPods-authoritative
+### Canonical social writes remain ActivityPods-authoritative — REUSE_BEHIND_ADAPTER
 
-The old app-framework `pod-outbox.post` helper preserves key custody by posting through ActivityPods signing/proxy behavior, but it must not be treated as the final modern delivery boundary by itself.
+The legacy app-framework `pod-outbox.post` helper already posts through the actor's canonical outbox while preserving ActivityPods/SemApps signing authority.
 
-The newer federation work establishes a stronger boundary:
+The modern Pod-provider core goes further. `services/core/activitypub.js` resolves one explicit remote-delivery authority mode and constructs ActivityPub with that strategy. In native mode SemApps remains remote-delivery authority and the sidecar is observation-only. Under explicit external-authority cutover, the same canonical ActivityPub outbox path creates the durable handoff used by the external delivery executor.
 
-1. ActivityPods is the local actor/account authority.
-2. ActivityPods resolves recipient personal/shared inbox routing before durable handoff.
-3. The sidecar receives a frozen target snapshot and does not independently rediscover recipient routes.
-4. The sidecar performs delivery using ActivityPods-delegated signatures for Pod/user actors.
+`outbox-emitter.service.js` confirms the distinction:
 
-Therefore Phanpy mutations terminate at the ActivityPods canonical write/outbox boundary. Phanpy must never submit federation delivery targets, write Redis/RedPanda infrastructure directly, or address sidecar delivery workers directly.
+- native `activitypub.outbox.posted` events become committed observation/indexing events;
+- external `activitypub.outbox.remote-delivery.handoff-queued` events require a valid `ap.delivery-plan.v1` and consume its already-frozen remote recipient routing snapshot;
+- both paths emit the normalized `ap.outbox.committed.v1` observation event;
+- public-search consent/indexability remains attached to the committed event rather than inventing a second write route.
 
-### Modern ActivityPub signing authority is already on ActivityPods `master` — REUSE_AS_IS
+Therefore Phanpy mutations terminate at the ActivityPods canonical social write/outbox boundary. Phanpy must never:
 
-The previous revision of this audit incorrectly described ActivityPods PR #107 as the location of the current modern signing implementation. That conflated the existing default-branch authority model with a pending credential-hygiene hardening.
+- submit federation delivery targets;
+- choose native vs sidecar delivery authority;
+- write Redis or RedPanda directly;
+- call delivery workers;
+- call the internal signing API.
 
-Current `master`, in `pod-provider/backend/services/signing.service.js`, already registers:
+### Modern ActivityPub signing authority already exists on ActivityPods `master` — REUSE_AS_IS
+
+Current `master` registers:
 
 ```text
 POST /api/internal/signatures/batch
 ```
 
-The endpoint is protected by the internal bearer token (`ACTIVITYPODS_TOKEN`, with the present compatibility fallback in configuration), keeps private key material inside ActivityPods, batches requests by actor, and performs authoritative local actor/key resolution before signing.
+and keeps private RSA key material inside ActivityPods.
 
-The executable `master` authority chain is:
+The executable local authority chain on `master` is:
 
 ```text
-auth.account.findByWebId
-  -> require exact account.webId === actorUri and a local account username/dataset
-  -> activitypub.actor.get
-  -> require exact returned actor id === actorUri
-  -> keys.getOrCreateWebIdKeys(RSA)
+auth.account.findByWebId(actorUri)
+  -> require exact local account.webId === actorUri
+  -> activitypub.actor.get(actorUri)
+  -> require exact actor id === actorUri
+  -> keys.getOrCreateWebIdKeys(RSA) in the account dataset
   -> intersect with actor.publicKey linkage
-  -> require exactly one key whose owner/controller === actorUri
-  -> derive keyId from rdfs:seeAlso
-  -> return signed HTTP headers to the sidecar
+  -> require exactly one owner/controller-matching key
+  -> derive keyId from signer-controlled rdfs:seeAlso
+  -> sign and return HTTP headers
 ```
 
-This is materially different from same-host URL inference and from the obsolete `actors.resolveWebIdForActor` / `actors.getPublicKeyId` dependency chain found in older integration copies.
+This is already materially stronger than same-host inference and the obsolete `actors.resolveWebIdForActor` / `actors.getPublicKeyId` chain found in older integration copies.
 
-Current `master` also fails closed for unknown signing profiles, malformed host/path/method inputs, digest mismatches, body-size limits, and unavailable/ambiguous actor signing material. The browser has no role in this endpoint and must never receive its bearer credential or signing key material.
+The current default-branch endpoint also validates signing profile, host/path/method, digest/body size, and key ambiguity. It is strictly service-internal from Phanpy's perspective.
 
-### ActivityPods PR #107 is pending credential-hygiene hardening, not the architectural baseline
+### ActivityPods PR #107 is security hardening, not the prerequisite for the signer
 
-PR #107 (`security/signing-credential-hygiene-forward-port`) retains the same account/actor authority premise but tightens the key-resolution implementation. In particular, it removes signing-path dependence on `keys.getOrCreateWebIdKeys` and instead follows actor-attached public-key IDs through existing key storage, requiring an unambiguous actor-controlled RSA private key rather than allowing the signing path to create/recover a key opportunistically.
+PR #107 (`security/signing-credential-hygiene-forward-port`) must not be described as introducing the modern signing boundary. That boundary and the `auth.account.findByWebId -> activitypub.actor.get -> keys.getOrCreateWebIdKeys` authority chain are already on `master`.
 
-The architectural consequence for Phanpy is deliberately small:
+PR #107 hardens the surrounding trust boundary, including dedicated `ACTIVITYPODS_TOKEN` use, removal of reverse-direction credential fallbacks, stricter credential/date handling, adjacent ActivityPub discovery surfaces, ATProto signing authority, password-verification separation, and repository/config hygiene.
 
-- Phanpy targets the ActivityPods canonical mutation boundary, not either signing implementation detail;
-- PR #107 should be tracked as defense-in-depth for ActivityPods/federation deployment and integration tests;
-- Phanpy implementation must not block on PR #107 unless a concrete runtime contract it needs is changed by that PR.
+For Phanpy:
 
-### Stale signing APIs and integration copies must not become Phanpy dependencies
+- the internal signer is not a client API;
+- the integration architecture does not block on PR #107;
+- deployment/security qualification should track #107 because its hardening matters to the final ActivityPods + sidecar trust model.
 
-The federation repository contains an older ActivityPods integration copy of `signing.service.js` using obsolete signer-locality/key-resolution dependencies. ActivityPods `master` is already newer than that copy.
+### Stale integration copies must not become client dependencies
 
-The sidecar also contains legacy-looking ActivityPods client key/signature helper methods that are not the live browser-facing mutation contract. These are implementation-history/compatibility artifacts unless a current caller proves otherwise.
+The federation repository contains historical ActivityPods integration copies and compatibility helpers. They are not automatically current contracts.
 
-Rule for the Phanpy integration:
+The required dependency direction is:
 
 ```text
-browser -> ActivityPods application/social mutation contract
-        -> ActivityPods authority/outbox
-        -> durable federation handoff
-        -> sidecar delivery
-        -> ActivityPods internal signing service when a Pod actor signature is required
+browser
+  -> ActivityPods application/social mutation contract
+  -> ActivityPods canonical state/outbox
+  -> selected native or durable external federation executor
+  -> ActivityPods internal signer when a Pod actor signature is required
 ```
 
-Never invert this chain by making Phanpy call signing, queue, delivery, or recipient-routing internals.
+Phanpy never inverts this chain.
+
+### Media storage and the media pipeline already have concrete ownership — REUSE_BEHIND_ADAPTER / HARDEN_AND_EXPOSE
+
+ActivityPods has a `files` controlled container accepting `semapps:File` resources for `image/*` and `video/*`. This is the local Pod-provider file substrate.
+
+The newer media architecture also exposes a trusted internal media-pipeline API that:
+
+- resolves only allowed local ActivityPods source origins;
+- verifies the resource is a SemApps file;
+- constrains file access to the configured uploads root;
+- validates/sniffs supported image/video MIME types;
+- bounds source size;
+- writes processed asset, safety-signal, and moderation metadata back to the authoritative file resource.
+
+That internal `/api/internal/media-pipeline/*` surface is service-to-service and must not be called directly by Phanpy.
+
+The remaining client-facing work is therefore narrower: define the authenticated browser upload/create-file contract and map its resulting `semapps:File` URI into `MediaRepository`, while the existing media pipeline performs processing behind ActivityPods.
+
+### ActivityPods already participates in browser-safe realtime authorization — HARDEN_AND_EXPOSE
+
+ActivityPods `master` contains internal services expressly designed to let the sidecar expose a public authenticated streaming facade without learning ActivityPods authentication internals:
+
+```text
+POST /api/internal/streaming/resolve-principal
+POST /api/internal/streaming/authorize-topics
+```
+
+`resolve-principal` resolves forwarded user bearer/cookie session material to the authoritative WebID/principal. `authorize-topics` validates supported topics for an authenticated principal.
+
+These endpoints are sidecar-facing and use service credentials; Phanpy must not call them. Their presence means the correct browser architecture is already defined: Phanpy talks to the public FEP-3ab2 control/stream facade, and the sidecar asks ActivityPods to resolve/authorize the viewer server-side.
 
 ## Verified findings — Mastopod federation/query architecture
 
 ### Public indexing already exists — REUSE_AS_IS
 
-`SearchIndexerService` is the RedPanda -> public-search projection path. It already handles public-search consent, AP projection, batching, deduplication, tombstones, DLQ behavior, OpenSearch/Qdrant targets, and public author/content projections.
+`SearchIndexerService` is the RedPanda -> public-search projection path. It already handles public-search consent, ActivityPub projection, batching, deduplication, tombstones, DLQ behavior, OpenSearch/Qdrant targets, and public author/content projections.
 
 Phanpy must not build another public ingestion/indexing pipeline.
 
-### Legacy/phase-era query classes are not the primary frontend contract
+### The newer `src/feed/` subsystem is the relevant frontend-provider contract
 
-`search/queries/FeedCandidateService.ts` and `PublicSearchService.ts` remain useful lower-level/phase-era query code, but the newer `src/feed/` subsystem is the more relevant application-provider contract.
+Older query classes remain useful lower-level code, but `fedify-sidecar/src/feed/` now defines the more relevant application-provider layer.
 
-The earlier audit incorrectly inferred that no feed/hydration route existed because it searched usages of those older classes. That conclusion is superseded by the findings below.
+Its contracts cover:
 
-### A concrete provider feed contract already exists — HARDEN_AND_EXPOSE
-
-`fedify-sidecar/src/feed/contracts.ts` defines validated contracts for:
-
-- feed definitions;
 - feed kinds: graph, discovery, topic, locality, notifications, custom;
 - sources: Stream1, Stream2, canonical, firehose, unified;
 - public/authenticated/internal visibility;
 - chronological/ranked/blended ranking;
 - stable feed skeletons;
 - opaque cursors;
-- filters for tags, languages and authors;
-- hydration shapes;
-- hydrated actor/content/media/engagement/provenance results;
-- explicit hydration omissions such as deleted, blocked and viewer-not-allowed.
+- tag/language/author filters;
+- hydration shapes and provenance;
+- explicit omission reasons such as deleted, blocked, and viewer-not-allowed.
 
-This is much closer to the protocol-neutral Phanpy `FeedRepository` contract than the older candidate service.
+### Feed query and hydration routes already exist — HARDEN_AND_EXPOSE
 
-### Feed query and hydration HTTP routes are already registered — HARDEN_AND_EXPOSE
-
-`registerFeedFastifyRoutes` exposes provider-internal endpoints including:
+Current internal provider routes include:
 
 ```text
 GET  /internal/feed/definitions
 POST /internal/feed/query
 POST /internal/feed/hydrate
 POST /internal/feed/viewed
-GET  /internal/feed/stream      # SSE
+GET  /internal/feed/stream
 ```
 
-and the same subsystem supports WebSocket attachment.
+with WebSocket support in the same subsystem.
 
-`DefaultPodFeedService` validates feed visibility/provider selection, retries retryable provider errors, validates provider output, deduplicates stable IDs, and returns feed capabilities.
+`DefaultPodFeedService` validates provider/visibility, validates outputs, retries bounded retryable provider failures, deduplicates stable IDs, and returns capabilities.
 
-`DefaultPodHydrationService` groups by source, uses bounded concurrency/retries, deduplicates hydration inputs, and returns explicit omission reasons instead of silently fabricating unavailable content.
+`DefaultPodHydrationService` groups by source, uses bounded concurrency/retries, deduplicates inputs, and exposes omission reasons rather than fabricating unavailable objects.
 
-These are real runtime contracts on current `main`.
+These internal routes use service credentials and therefore are not browser APIs. The missing work is the browser-safe authenticated façade, not another feed engine.
 
-### These routes are not browser-ready as-is
+### Public FEP-3ab2 streaming is the intended browser realtime control plane — HARDEN_AND_EXPOSE
 
-The current `/internal/feed/*` surface authenticates with the sidecar service bearer token and provider permission headers. Those credentials belong to trusted service-to-service communication and must never be embedded in Phanpy.
-
-Therefore the missing client-facing work is a browser-safe application/session boundary, not a new feed engine.
-
-Target:
+The federation architecture contains an explicit FEP-3ab2 design that keeps `/internal/feed/stream` and `/internal/feed/stream/ws` service-internal while adding a separate public browser/server surface owned by the sidecar:
 
 ```text
-Phanpy
-  -> browser-safe authenticated application gateway
-  -> existing provider feed/query/hydration services
-  -> OpenSearch/Qdrant / public projections
+POST   /streaming/control
+DELETE /streaming/control
+GET    /streaming/control/subscriptions
+POST   /streaming/control/subscriptions
+DELETE /streaming/control/subscriptions
+GET    /streaming/stream
 ```
 
-The gateway must bind the authenticated viewer identity server-side rather than trusting an arbitrary browser-supplied `viewerId`.
+The design delegates principal resolution and topic authorization back to ActivityPods, stores short-lived stream session/subscription state in Redis, and exposes stable public topics rather than raw implementation names.
 
-### Realtime feed delivery already exists — HARDEN_AND_EXPOSE
+Planned/defined topics include:
 
-The earlier audit statement that no Durable Streams implementation existed was incorrect and is superseded.
+- `feeds/public/local`
+- `feeds/public/remote`
+- `feeds/public/unified`
+- `feeds/public/canonical`
+- `notifications`
+- `feeds/personal`
+- `feeds/local`
+- `feeds/global`
 
-Current `main` includes:
+Private `notifications` and `feeds/personal` events are principal-scoped and enter through the private Redis fan-out channel, not public RedPanda.
+
+This is a better Phanpy `LiveRepository` boundary than exposing the internal feed stream routes.
+
+### Existing public stream ingestion remains reusable
+
+Current stream infrastructure already includes:
 
 - `DurableStreamContracts.ts`;
 - `DurableStreamSubscriptionService.ts`;
-- SSE and WebSocket feed routes;
+- SSE/WebSocket internal transports;
 - `FeedStreamKafkaConsumer.ts`;
-- `UnifiedFeedBridge.ts`;
-- tests for the stream service/routes.
+- `UnifiedFeedBridge.ts`.
 
-`FeedStreamKafkaConsumer` maps RedPanda topics into stream envelopes:
+`FeedStreamKafkaConsumer` maps:
 
 ```text
 ap.stream1.local-public.v1  -> stream1
@@ -270,63 +352,49 @@ ap.stream2.remote-public.v1 -> stream2
 canonical.v1                -> canonical
 ```
 
-It embeds Kafka partition/offset information in each stream cursor and fans validated envelopes into the SSE/WebSocket subscription service.
+and carries Kafka partition/offset information in cursors.
 
-`UnifiedFeedBridge` produces an observe-only normalized `unified` public stream from canonical events plus remote public Stream2 events without writing protocol state.
+`UnifiedFeedBridge` creates an observe-only normalized public stream across canonical and remote-public events without becoming protocol authority.
 
-### Realtime is not yet durably replayable
+### Public replay is still incomplete
 
-The name `DurableStreamSubscriptionService` must not be interpreted as proof of complete durable replay semantics.
+Existing realtime fan-out is not sufficient proof of durable browser replay. The internal v1 subscription service has in-process cursor/session state and current capabilities declare `replayCapable: false`.
 
-The current implementation explicitly states:
+Phase 9 therefore remains `HARDEN_AND_EXPOSE` plus focused new replay work:
 
-- fan-out is in-process;
-- cursor state is in-memory in v1;
-- there is no Redis/external cursor persistence;
-- supplied resume cursors are decoded but the subscription service itself does not seek/replay RedPanda history.
+1. define exact partition/offset cursor semantics;
+2. add bounded RedPanda seek/replay or an equivalent durable replay projection;
+3. define retention-expired cursor behavior;
+4. provide snapshot fallback;
+5. make replay -> live cutover gap-free and duplicate-safe;
+6. preserve delete/update/tombstone ordering;
+7. bind browser subscriptions to ActivityPods-resolved principals;
+8. apply equivalent moderation/filter policy to snapshot and live paths.
 
-The sidecar startup configuration currently declares stream capabilities with:
+### Private realtime does not replace authoritative reads
 
-```text
-replayCapable: false
-```
+The FEP design intentionally treats `notifications` and `feeds/personal` as refresh/append hints. Query/hydration and ActivityPods authoritative state remain the recovery path.
 
-Therefore Phase 9 is **HARDEN_AND_EXPOSE**, not `NEW_WORK` and not `REUSE_AS_IS`.
+That is desirable for Phanpy: reconnect correctness should not require lossless durable storage of every private UI hint.
 
-Required Phase 9 work:
-
-1. preserve the existing stream envelope/SSE/WS contracts where compatible;
-2. define exact replay semantics from the Kafka partition/offset cursor;
-3. implement bounded RedPanda seek/replay or a durable replay projection without exposing Kafka directly to clients;
-4. define retention/expired-cursor behavior and snapshot fallback;
-5. guarantee duplicate/out-of-order safety across replay -> live handoff;
-6. expose a browser-safe authenticated subscription contract;
-7. bind viewer-specific streams/filters to server-authorized viewer context;
-8. keep private/Pod changes on the Solid Notifications plane unless a separately reviewed private stream contract is introduced.
-
-### Unified public stream already exists
-
-The existing `unified` stream is especially useful for the Phanpy architecture: it provides a normalized public event surface across canonical local/protocol-bridged activity and remote ActivityPub without allowing the client to depend on raw RedPanda topic payload diversity.
-
-It should be evaluated as the default public live substrate for Phanpy before inventing feed-specific streams.
-
-## Authority/transport ownership matrix
+## Authority / transport ownership matrix
 
 | Concern | Browser / Phanpy | ActivityPods / SemApps | Federation sidecar |
 | --- | --- | --- | --- |
-| Session/app grant | request/use authorized session | authority + Pod/application grant | none |
+| Session/app grant | request/use authorized session | canonical auth + app grant authority | forwards browser auth only where required |
 | Local actor identity | consume normalized identity | canonical authority | projection only where needed |
 | Pod CRUD/ACL | adapter calls | canonical resource/permission authority | none |
 | Social mutation intent | submit user operation | validate/apply canonical write + outbox | never accepts browser mutation intent |
 | Recipient routing | none | resolve/freeze personal/shared inbox targets | consume frozen target snapshot |
 | AP signing keys | none | sole custody + internal signing | receive signed headers only |
-| Federation delivery | none | durable handoff authority | execute outbound delivery/retries |
-| Public index/feed | consume browser-safe façade | supply authoritative local/public events | projection/query/hydration acceleration |
-| Public live | consume browser-safe SSE/WS | produce authoritative events | project/fan-out; replay to be completed |
-| Private/Pod live | Solid Notifications client adapter | Solid Notifications + authorized Pod state | no public-stream leakage |
-| User-visible AP notifications | render normalized semantics | ActivityPub/Pod notification authority | public projection only if policy permits |
-
-This matrix is the guardrail against accidental duplication. A Phanpy adapter may normalize or combine outputs, but it must not silently acquire authority owned by a backend plane.
+| Federation delivery | none | select/own canonical delivery authority mode | execute only when external authority is explicitly selected |
+| Public index/feed | consume browser-safe façade | produce authoritative local/public events | projection/query/hydration acceleration |
+| Public live | public FEP control/stream client | resolve principal + authorize topics | FEP session/control/fan-out + public stream routing |
+| Private notification/feed hints | consume principal-scoped FEP events | emit authorized private hints | principal-scoped Redis merge/fan-out |
+| Pod/resource live | Solid Notifications client adapter | Solid Notifications + authorized Pod state | no public-stream leakage |
+| User-visible AP notifications | render normalized semantics | ActivityPub/Pod notification authority | refresh hint/projection only as policy permits |
+| Media upload | browser-safe MediaRepository | canonical `semapps:File` resource | no direct upload authority |
+| Media processing | observe resulting asset state | file authority + media-pipeline bridge | media pipeline may process behind internal boundary |
 
 ## Corrected contract classification
 
@@ -334,51 +402,54 @@ This matrix is the guardrail against accidental duplication. A Phanpy adapter ma
 | --- | --- | --- |
 | ActivityPods account/actor authority | `REUSE_AS_IS` | ActivityPods |
 | ActivityPods app registration semantics | `REUSE_BEHIND_ADAPTER` | Phanpy session adapter over ActivityPods/Solid |
+| ActivityPods account/bootstrap | `REUSE_BEHIND_ADAPTER` | ActivityPods auth; Phanpy drives UI only |
 | Pod resources/permissions | `REUSE_BEHIND_ADAPTER` | ActivityPods |
 | ActivityPods collections | `REUSE_BEHIND_ADAPTER` | ActivityPods + Phanpy collection repository |
 | ActivityPods canonical social mutations | `REUSE_BEHIND_ADAPTER` | Phanpy mutation repository -> ActivityPods |
-| ActivityPods current AP signing authority | `REUSE_AS_IS` | ActivityPods `master`; internal only, never browser-facing |
-| ActivityPods PR #107 signing hardening | `HARDEN_AND_EXPOSE` only to trusted sidecar semantics | Pending defense-in-depth; not a Phanpy client prerequisite |
-| Sidecar delivery routing/queues | `REUSE_AS_IS` | Internal only |
+| ActivityPods current AP signing authority | `REUSE_AS_IS` | ActivityPods `master`; internal only |
+| ActivityPods PR #107 signer/trust hardening | `HARDEN_AND_EXPOSE` to trusted services only | Security qualification, not Phanpy prerequisite |
+| Native/external remote-delivery selection | `REUSE_AS_IS` | ActivityPods deployment authority; invisible to browser |
 | Public search indexing | `REUSE_AS_IS` | Federation architecture |
 | Provider feed contracts/service | `HARDEN_AND_EXPOSE` | Federation architecture + browser-safe gateway |
 | Provider hydration service | `HARDEN_AND_EXPOSE` | Federation architecture + browser-safe gateway |
-| Viewership history integration | `HARDEN_AND_EXPOSE` | Bind viewer server-side; never trust browser identity input |
-| SSE/WebSocket realtime transport | `HARDEN_AND_EXPOSE` | Existing implementation |
-| RedPanda -> realtime consumer | `REUSE_AS_IS` with replay integration | Existing implementation |
-| Unified public live stream | `REUSE_BEHIND_ADAPTER` | Evaluate as Phanpy default public live source |
-| Durable replay/resume | `NEW_WORK` inside existing realtime subsystem | Phase 9 |
-| Solid Notifications transport | `REUSE_BEHIND_ADAPTER` | ActivityPods/SemApps + Phanpy private live adapter |
+| Public FEP-3ab2 control/stream facade | `HARDEN_AND_EXPOSE` | Sidecar + ActivityPods principal/topic authorization |
+| RedPanda -> public realtime consumer | `REUSE_AS_IS` with replay integration | Federation architecture |
+| Unified public live stream | `REUSE_BEHIND_ADAPTER` | Default candidate for Phanpy public live source |
+| Durable public replay/resume | `NEW_WORK` inside existing realtime subsystem | Phase 9 |
+| Principal-scoped notification/personal-feed hints | `REUSE_BEHIND_ADAPTER` / `HARDEN_AND_EXPOSE` | ActivityPods emitter + sidecar FEP router |
+| Solid Notifications transport | `REUSE_BEHIND_ADAPTER` | ActivityPods/SemApps + Phanpy Pod-live adapter |
 | ActivityPub notification semantics | `REUSE_BEHIND_ADAPTER` | ActivityPods + Phanpy notification repository |
+| SemApps file substrate | `REUSE_BEHIND_ADAPTER` | ActivityPods `files` container |
+| Internal media processing bridge | `REUSE_AS_IS` | ActivityPods/media pipeline; never browser-facing |
+| Browser media upload adapter | `HARDEN_AND_EXPOSE` | Define exact authenticated client contract |
 | Framework7 | `DEFERRED` pending Phase 3 proof | Phanpy |
 
 ## Immediate Phase 0 work still open
 
 ### ActivityPods
 
-- verify current Solid-OIDC/session frontend/runtime stack beyond the legacy React hook;
-- verify browser-appropriate application-grant/access-needs flow for Phanpy;
-- verify the exact canonical post/reply/like/announce/follow mutation entry points against the modern delivery path;
-- verify Solid Notifications endpoint discovery/subscription behavior and authorization in the current fork;
-- verify media/blob ownership and client upload contract;
-- track PR #107 as signing credential-hygiene hardening, without treating it as a Phanpy client prerequisite.
+- identify the exact Preact/browser Solid-OIDC client primitive to use for login, restoration, logout, and token refresh while preserving the verified Data Interoperability registration flow;
+- enumerate the exact canonical client mutation shapes for create/reply/follow/unfollow/like/unlike/announce/undo/edit/delete rather than relying on the generic outbox boundary alone;
+- verify browser Solid Notifications endpoint discovery/subscription and reconnection behavior against the current SemApps version;
+- define the browser-facing `semapps:File` upload/create contract that precedes the already-existing media pipeline;
+- track PR #107 for credential/trust-boundary hardening and final federation qualification, without treating it as the signer prerequisite.
 
 ### Federation/query architecture
 
-- audit concrete feed registry definitions/providers currently enabled on `main`;
-- verify viewer authorization/moderation policy placement in feed query, hydration and realtime paths;
-- verify stable cursor semantics for snapshot feeds independently of live replay;
-- define browser-safe gateway/session authorization around `/internal/feed/*`;
-- define and implement replay semantics for current `replayCapable: false` streams;
-- verify whether custom feed definitions already have provider/compiler support beyond the generic contract;
-- verify search HTTP exposure separately from feed/hydration exposure;
-- reconcile/remove or clearly quarantine stale ActivityPods signing integration copies so they cannot be mistaken for current authority.
+- audit active feed registry definitions/providers on current `main`;
+- prove viewer authorization and moderation/filter policy at feed query, hydration, FEP topic authorization, and realtime delivery boundaries;
+- verify snapshot cursor stability independently of live replay;
+- confirm implementation status—not just design status—of every public FEP-3ab2 control/stream route;
+- implement/qualify replay semantics for public durable streams;
+- verify custom-feed compiler/provider support beyond the generic `custom` contract;
+- verify browser-facing public search exposure.
 
 ### Phanpy
 
-- map current Mastodon operation families to these verified replacement contracts;
-- add behavior-preservation tests around feed pagination, mutations, hydration/cache invalidation, and live update/delete behavior before Phase 2 refactoring;
-- define protocol-neutral domain types from the verified `src/feed/contracts.ts` shapes rather than from Mastodon response objects.
+- map current Mastodon operation families to the verified replacement contracts;
+- add behavior-preservation tests for feed pagination, mutations, hydration/cache invalidation, notification refresh, and live update/delete behavior before Phase 2 refactoring;
+- define protocol-neutral domain types from the verified feed/hydration/FEP concepts rather than Mastodon DTO aliases;
+- keep public live, private hint, and Pod-resource synchronization as separate `LiveRepository` sources even if the UI merges their effects.
 
 ## Phase 0 exit gate
 
@@ -390,4 +461,4 @@ Phase 0 is complete only when every client capability has:
 - an authority/privacy boundary;
 - a testable implementation path.
 
-The point of Phase 0 is not to delay implementation. It is to ensure Phase 1 starts from the contracts that actually exist, especially where newer architecture already solved work that older files or narrow code searches can hide.
+The purpose is not to delay implementation. It is to ensure Phase 1 starts from contracts that actually exist, especially where the current architecture has already solved work that older files or narrow searches can hide.
