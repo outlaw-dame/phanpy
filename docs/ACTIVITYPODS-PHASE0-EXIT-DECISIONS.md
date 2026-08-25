@@ -2,13 +2,13 @@
 
 ## Status and precedence
 
-This document closes the six implementation-contract decisions that remained open after the Phase 0 architecture, contract audit, authentication/mutation audit, FEP contract audit, and operation map.
+This document closes the implementation-contract decisions that remained open after the Phase 0 architecture, contract audit, authentication/mutation audit, FEP contract audit, and operation map.
 
-For these six decisions, this document supersedes earlier `Still to verify`, `remaining blocker`, or similarly tentative wording in the other Phase 0 documents. Executable repository code remains the ultimate source of truth if it changes after this decision record.
+For these decisions, this document supersedes earlier `Still to verify`, `remaining blocker`, or similarly tentative wording in the other Phase 0 documents. Executable repository code remains the ultimate source of truth if it changes after this decision record.
 
 The important distinction is now:
 
-- **Phase 0 architecture/contract uncertainty is closed** for these six areas;
+- **Phase 0 architecture/contract uncertainty is closed** for these areas;
 - several decisions intentionally create **implementation work** in ActivityPods, the federation architecture, or Phanpy;
 - a capability remains disabled until its implementation acceptance criteria pass.
 
@@ -52,9 +52,11 @@ Required semantics:
 
 ### Implementation ownership
 
-`ActivityPods` — `NEW_WORK`.
+`ActivityPods` — `NEW_WORK` for social/browser mutations.
 
-The preferred implementation is a durable ActivityPods-owned receipt/ledger in an authoritative dataset or controlled internal store, transactionally coupled to canonical mutation creation as closely as the current SemApps/LDP transaction model permits. A Redis-only dedupe key is specifically rejected.
+There is useful prior art in `provider-capabilities.service.js`: account provisioning already requires an idempotency key by default and implements reserve/complete/fail semantics. That implementation is deliberately scoped to account provisioning and currently uses process-memory maps, so it is **not** sufficient for authoritative social mutation deduplication.
+
+The preferred social-mutation implementation is a durable ActivityPods-owned receipt/ledger in an authoritative dataset or controlled internal store, transactionally coupled to canonical mutation creation as closely as the current SemApps/LDP transaction model permits. A Redis-only dedupe key or process-memory-only map is specifically rejected.
 
 ### Acceptance gate
 
@@ -66,9 +68,11 @@ The capability is not production-ready until concurrent duplicate submissions, r
 
 The federation architecture already has cross-protocol quote semantics. Its canonical post intents carry `quoteOf`, and its interaction-policy model carries quote permission semantics for ActivityPub and ATProto projection.
 
-Therefore quote support is **not new Tier-2 protocol work**.
+ActivityPods also already has a runtime-wired FEP-044f `quote-authorization` service. It evaluates inbound `QuoteRequest` activities against the quoted object's advertised `interactionPolicy.canQuote`, supports the automatic-approval/public case, and publishes the resulting authorization response through the authoritative actor outbox.
 
-What remains is an ActivityPods-authoritative browser mutation ingress that proves the user's canonical post can preserve:
+Therefore quote support is **not new Tier-1 or Tier-2 protocol work**.
+
+What remains is an ActivityPods-authoritative browser mutation ingress that proves the user's outbound canonical post can preserve:
 
 ```text
 quoteOf
@@ -82,7 +86,8 @@ through authoritative ActivityPods storage/outbox processing and the existing pr
 Classification:
 
 - canonical quote model/projectors: `REUSE_AS_IS` — federation architecture;
-- ActivityPods-authoritative quote ingress and regression proof: `HARDEN_AND_EXPOSE` / focused adapter work;
+- inbound quote authorization: `REUSE_AS_IS` — ActivityPods FEP-044f service;
+- outbound ActivityPods-authoritative quote creation/capability/regression proof: `HARDEN_AND_EXPOSE`;
 - Phanpy quote UI: capability-gated until that proof passes.
 
 A plain hyperlink masquerading as a quote is not an acceptable compatibility fallback.
@@ -91,27 +96,39 @@ A plain hyperlink masquerading as a quote is not an acceptable compatibility fal
 
 The federation architecture already implements canonical poll intents and ActivityPub FEP-9967 `Create(Question)` projection, including `oneOf`/`anyOf`, expiry, counts, and poll-vote intent semantics.
 
-Therefore poll federation/projection is also **not greenfield Tier-2 work**.
+Current ActivityPods `master` also already includes a runtime-wired `polls-manager` service. It:
 
-The missing authority is Tier 1. The current ActivityPods shapes repository exposes ShapeTrees for File and ActivityStreams Article/Audio/Event/Image/Note/Profile/Video, but no current `Question` ShapeTree. ActivityPods therefore does not yet have a verified provider-provisioned authoritative `Question` resource/container contract for Phanpy to target.
+- registers outbound `Question` objects from `activitypub.outbox.posted`;
+- supports `oneOf` and `anyOf` option models;
+- retains poll author, audience, recipients, close time, option counts, vote IDs, voter choices, and voters;
+- prechecks and commits inbound FEP-9967 vote Notes;
+- rejects duplicate vote IDs, duplicate choices, second votes in single-choice polls, closed polls, unknown options, and unauthorized voters;
+- evaluates restricted audiences, including authoritative SemApps collection membership through the triplestore;
+- publishes `Update(Question)` through the poll author's authoritative ActivityPods outbox after accepted votes.
 
-Required Tier-1 work:
+Therefore the earlier inference that the absence of a public `Question` ShapeTree meant ActivityPods had no Tier-1 poll authority was incorrect. A ShapeTree is required only if Phanpy is ultimately designed to manage a Pod-owned Question resource directly through Data Interoperability; it is **not** evidence that the existing outbox-mediated poll path is absent.
 
-1. define/approve a `Question` shape and ShapeTree compatible with the deployed ActivityStreams/FEP-9967 representation;
-2. provision/discover an authoritative Question container;
-3. define Create/Edit/Delete authorization and ownership rules;
-4. define vote authorization and FEP-9967 vote-Note handling;
-5. ensure vote-count/update behavior is race-safe and authority-preserving;
-6. prove native and external federation modes yield the same canonical outcome;
-7. expose capability metadata so Phanpy never renders a creation/vote path against a provider that lacks the contract.
+The real current hardening gap is durability and restart/concurrency behavior. `polls-manager` initializes `pollStateById` as a process-local `Map`, and the current poll-specific test coverage verifies audience membership scalability but does not prove reconstruction of poll/voter state after a process restart. The current service file contains no startup recovery routine or durable poll/vote ledger.
+
+Required ActivityPods hardening:
+
+1. preserve the existing authoritative outbox/FEP-9967 semantics rather than replacing them;
+2. make poll state and vote-deduplication state durable **or** deterministically reconstruct them from authoritative durable ActivityPods data at startup;
+3. prove a restart cannot forget prior vote IDs/voter choices or regress option counts;
+4. prove concurrent votes cannot race counts, duplicate detection, or single-choice enforcement;
+5. expose explicit provider/application capability metadata for poll creation and poll voting;
+6. prove the authenticated browser/outbox ingress for creating/editing/deleting Questions and adding votes;
+7. prove native and external federation modes yield the same canonical outcome.
 
 Classification:
 
 - canonical poll model/projectors: `REUSE_AS_IS` — federation architecture;
-- ActivityPods Question/vote authority: `NEW_WORK` — ActivityPods + shapes/provider provisioning;
-- Phanpy polls: disabled until that Tier-1 acceptance gate passes.
+- existing ActivityPods FEP-9967 poll manager: `HARDEN_EXISTING`;
+- poll durability/restart/concurrency + browser capability/ingress: focused ActivityPods work;
+- Question ShapeTree/container: **conditional**, only if a direct Pod-resource management path is selected rather than the existing outbox-mediated authority path;
+- Phanpy polls: capability-gated until the ActivityPods durability/ingress acceptance gate passes.
 
-No Mastodon DTO shim is introduced to conceal this gap.
+No Mastodon DTO shim is introduced to conceal or bypass those gates.
 
 ## Decision 3 — Browser-safe feed, hydration, and search facade
 
@@ -251,12 +268,12 @@ The provider's normal data authorization is ShapeTree-scoped WAC access. Request
 | uploaded media | File ShapeTree — `acl:Read`, `acl:Write` | request when media upload is enabled |
 | authored Note resources | Note ShapeTree — `acl:Read`, `acl:Write` **only if** the selected ActivityPods app-mediated mutation path requires the app DataGrant to manage those resources | integration test must prove whether required for the final browser/app ingress |
 | profile resource editing | Profile ShapeTree — `acl:Read`, `acl:Write` | optional; request only if profile editing uses the Profile resource contract |
-| custom-feed definitions | dedicated Phanpy/open social feed-definition ShapeTree — `acl:Read`, `acl:Write` | `NEW_WORK`; define vocabulary/ShapeTree before Phase 12, do not invent the public URI here |
+| custom-feed definitions | dedicated Phanpy/open social feed-definition ShapeTree — `acl:Read`, `acl:Write` | `NEW_WORK`; define vocabulary/ShapeTree before the custom-feed phase, do not invent the public URI here |
 | portable private social preferences | dedicated app/open-social preferences ShapeTree — `acl:Read`, `acl:Write` | `NEW_WORK` if not safely unified with another standard user-owned resource |
 | sharing/editing ACLs | add `acl:Control` only on the specific shareable ShapeTrees | optional; never Pod-wide |
-| polls | future Question ShapeTree with least required modes | blocked until Question ShapeTree/provider contract exists |
+| polls | **no baseline Question DataGrant** | existing ActivityPods poll authority is outbox-mediated; add a Question ShapeTree grant only if a later design intentionally makes Questions directly Pod-managed resources |
 
-The current public ActivityPods shapes repository has a File ShapeTree and ActivityStreams Note/Profile/etc. ShapeTrees, but no current generic `Question` or `Collection` ShapeTree. That absence is treated as a capability constraint, not worked around with broad ACL grants.
+The current public ActivityPods shapes repository has a File ShapeTree and ActivityStreams Note/Profile/etc. ShapeTrees, but no current generic `Question` or `Collection` ShapeTree. That is useful information for direct Pod-resource design, but it is **not** used as proof that an outbox-mediated ActivityPub capability is absent.
 
 ### Collections and custom feeds
 
@@ -287,17 +304,36 @@ Provider integration tests must prove for every requested access need that:
 - a feature upgrade requests only the delta and succeeds after explicit grant;
 - revocation invalidates the affected feature without corrupting unrelated local state.
 
+## Provider capability advertisement decision
+
+Current `provider-capabilities.service.js` exposes protocol status plus the `provider.account.provisioning` capability. It does **not** currently advertise quote or poll create/vote capabilities.
+
+Phanpy therefore must not infer feature availability simply from `protocols.activitypub.enabled`.
+
+The provider/application contract should add explicit stable capability IDs for optional or hardening-gated behavior. The exact identifiers should be defined once and shared by ActivityPods and Phanpy; examples of the required semantic granularity are:
+
+```text
+social.quote.create
+social.quote.authorize
+social.poll.create
+social.poll.vote
+social.poll.durable-state
+```
+
+Those strings are illustrative until the provider implementation lands. Phase 1 should model capabilities as a closed domain vocabulary rather than arbitrary UI strings, but it should not claim a capability is available until the provider advertises it and its acceptance gate passes.
+
 ## Final Phase 0 disposition
 
 | Previously open decision | Phase 0 disposition | Implementation consequence |
 | --- | --- | --- |
 | mutation idempotency | **closed** | build ActivityPods-authoritative durable receipt/dedupe boundary |
-| quote capability | **closed** | reuse Tier-2 canonical support; prove ActivityPods authoritative ingress before enabling |
-| poll capability | **closed** | reuse Tier-2 FEP-9967 support; add Tier-1 Question ShapeTree/container/vote authority |
+| quote capability | **closed** | reuse Tier-2 canonical support + ActivityPods FEP-044f authorization; prove outbound authoritative ingress before enabling create |
+| poll capability | **closed** | reuse Tier-2 FEP-9967 + existing ActivityPods poll manager; harden durable/restart/concurrent state and expose browser capability/ingress |
 | browser feed/hydration/search facade | **closed** | expose one ActivityPods-authenticated, server-principal-bound facade over existing Tier 3 |
 | cross-plane moderation | **closed** | central server viewer policy; realtime cannot bypass moderated hydration |
 | FEP long-gap recovery | **closed** | explicit stale/truncated reset + snapshot resync; bounded Redis stays fast path |
 | access-needs manifest | **closed** | feature-scoped least privilege; no baseline special rights; app-specific ShapeTrees only where genuinely required |
+| optional capability advertisement | **closed** | extend provider capability document; do not infer quote/poll support from generic ActivityPub enablement |
 
 ## Phase 0 exit gate
 
@@ -305,11 +341,12 @@ Phase 0 architecture/contract design is complete when this decision record is pr
 
 The next work is implementation, in dependency order:
 
-1. ActivityPods authoritative mutation idempotency;
+1. ActivityPods authoritative browser-mutation idempotency;
 2. browser-safe Tier-3 read facade plus server-bound viewer policy;
 3. FEP stale/truncated replay signaling and snapshot-reset contract;
-4. Phanpy/open-social custom-feed and private-preference ShapeTree/vocabulary design;
-5. ActivityPods Question ShapeTree/container/vote authority;
-6. ActivityPods adapters in Phanpy, capability-gated against the contracts above.
+4. explicit provider capability advertisement for hardening-gated social features;
+5. harden existing ActivityPods poll state for durability/restart/concurrency and prove browser ingress;
+6. Phanpy/open-social custom-feed and private-preference ShapeTree/vocabulary design;
+7. ActivityPods adapters in Phanpy, capability-gated against the contracts above.
 
 Phase 1 may continue in parallel where it only defines protocol-neutral contracts and preserves these authority boundaries. No client component should bypass a missing backend contract just to make a feature appear complete.
