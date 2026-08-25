@@ -2,157 +2,161 @@
 
 ## Purpose
 
-This document maps the concrete Mastodon operation families currently used by Phanpy to the ActivityPods + Mastopod contracts that will replace them behind protocol-neutral repositories.
+Maps concrete Mastodon operation families currently used by Phanpy to the ActivityPods + Mastopod contracts that replace them behind protocol-neutral repositories.
 
-It is intentionally implementation-oriented. Existing Mastodon behavior is the regression oracle; ActivityPods/Mastopod contracts are the new authority boundaries.
+Existing Mastodon behavior is the regression oracle; ActivityPods/Mastopod contracts become the new authority boundaries.
 
-## Verified Phanpy baseline
+## Current Phanpy seam
 
-Phanpy's current global API helper creates `masto` REST and streaming clients keyed by instance/account token. It also initializes instance capabilities, current-account identity, preferences, and the Mastodon streaming URL. This single helper currently mixes session, instance capability, REST transport, and live transport concerns.
-
-Phase 1/2 must split that into repository capabilities rather than introduce a second global protocol switch.
+`src/utils/api.js` currently creates Mastodon REST/stream clients and also initializes account identity, instance capabilities, preferences, and streaming state. Phase 1/2 must decompose this into repository capabilities rather than add ActivityPods conditionals throughout UI code.
 
 ## Operation matrix
 
-| Current Phanpy behavior | Current Mastodon operation | Target repository | ActivityPods / Mastopod owner | Classification | Notes / missing contract |
+| Phanpy behavior | Current Mastodon shape | Target repository | Target authority | Classification | Required mapping |
 | --- | --- | --- | --- | --- | --- |
-| Login / app registration | `/api/v1/apps`, OAuth authorize/token/revoke, PKCE | `SessionRepository` | ActivityPods + Solid/Data Interoperability | `REUSE_BEHIND_ADAPTER` | Replace Mastodon dynamic app registration with WebID/authorization-agent discovery, app registration, AccessNeedGroup/AccessGrant verification, Solid-OIDC session restoration/revocation. Exact Preact OIDC primitive still to select. |
-| Verify current account | `accounts.verifyCredentials()` | `SessionRepository` + `IdentityRepository` | ActivityPods | `REUSE_BEHIND_ADAPTER` | Identity is authoritative WebID/ActivityPub actor; no Mastodon numeric account ID as canonical identity. |
-| Preferences | `preferences.fetch()` + local store | `PrivateDataRepository` | ActivityPods Pod | `REUSE_BEHIND_ADAPTER` | Portable user preferences should be Pod resources; local browser cache remains projection/cache. |
-| Home snapshot | `timelines.home.list()` with `max_id`/`min_id`/`since_id` | `FeedRepository` | Mastopod feed service + ActivityPods private reads | `HARDEN_AND_EXPOSE` | Public followed material uses browser-safe feed gateway; restricted/private material is merged from authorized ActivityPods reads. |
-| Home polling | `timelines.home.list({ since_id })` | `FeedRepository.refresh()` | Same as home snapshot | `REUSE_BEHIND_ADAPTER` | Becomes snapshot refresh/fallback, not the primary live transport. |
-| Home live update/delete | Mastodon `streaming.user.subscribe()` events `status.update` / `delete` | `LiveRepository` | FEP-3ab2 + ActivityPods | `HARDEN_AND_EXPOSE` | Public events via FEP public topics; personal/private refresh via principal-scoped hints; resource changes via Solid Notifications. |
-| Search posts/accounts/tags | `v2.search.list({q,type,resolve,offset})` | `SearchRepository` | Mastopod public search + ActivityPods actor/WebFinger + authorized Pod search | `HARDEN_AND_EXPOSE` | Do not expose OpenSearch/Qdrant directly. Account resolution must preserve remote actor resolution semantics. |
-| Relationship batch read | `accounts.relationships.fetch({id[]})` | `RelationshipRepository` | ActivityPods | `REUSE_BEHIND_ADAPTER` | Server-authorized viewer identity; canonical relation objects should not expose Mastodon numeric-ID assumptions. |
-| Follow / unfollow / withdraw request | `accounts.$select(id).follow()` / `.unfollow()` | `RelationshipRepository` | ActivityPods canonical ActivityPub mutation | `REUSE_BEHIND_ADAPTER` | Must resolve target actor and submit canonical Follow/Undo through ActivityPods; federation executor remains invisible. |
-| Follow preferences | `.follow({ notify, reblogs })` | `RelationshipRepository` + `PrivateDataRepository` | ActivityPods/Pod | `HARDEN_AND_EXPOSE` | `notify`/repost-display choices are viewer preferences, not necessarily ActivityPub Follow wire fields; store portable preference state separately where needed. |
-| Mute / unmute | `accounts...mute({duration})` / `.unmute()` | `ModerationRepository` | ActivityPods/Pod | `HARDEN_AND_EXPOSE` | Local moderation policy, duration/expiry and notification-mute semantics must be defined against existing moderation services/resources. |
-| Block / unblock | `accounts...block()` / `.unblock()` | `RelationshipRepository` + `ModerationRepository` | ActivityPods canonical AP + local policy | `REUSE_BEHIND_ADAPTER` | ActivityPub Block is canonical social mutation; local enforcement must also affect read/feed/hydration/live paths. |
-| Remove follower | `accounts...removeFromFollowers()` | `RelationshipRepository` | ActivityPods | `HARDEN_AND_EXPOSE` | Must define exact ActivityPub-compatible operation and local relationship update semantics. |
-| Endorse/profile feature | account `.pin()` / `.unpin()` | `CollectionRepository` / profile metadata | ActivityPods Pod | `REUSE_BEHIND_ADAPTER` | Model as user-owned semantic/profile state rather than Mastodon-specific endpoint. |
-| List read/cache | `v1.lists.list()` / list fetch | `CollectionRepository` | ActivityPods collections | `REUSE_BEHIND_ADAPTER` | ActivityPods Collection/OrderedCollection is the portable substrate. |
-| List membership | account list membership + add/remove UI | `CollectionRepository` | ActivityPods collections | `REUSE_BEHIND_ADAPTER` | Use collection URI membership; avoid a second list database. |
-| Create post/reply | `v1.statuses.create(params)` with `Idempotency-Key` | `MutationRepository.createPost()` | ActivityPods canonical actor outbox | `REUSE_BEHIND_ADAPTER` | Preserve idempotency semantics. Reply maps to ActivityStreams object/activity with canonical `inReplyTo`, addressing and visibility. Exact client mutation shape still to formalize. |
-| Edit post | `statuses.$select(id).update(params)` | `MutationRepository.updatePost()` | ActivityPods | `HARDEN_AND_EXPOSE` | Must map to the ActivityPods-supported Update/canonical object mutation path and preserve edit-history behavior. |
-| Delete post | `statuses.$select(id).remove()` | `MutationRepository.deletePost()` | ActivityPods | `REUSE_BEHIND_ADAPTER` | Canonical Delete/tombstone path; client cache marks deleted only after/optimistically around authoritative write. |
-| Boost / unboost | `.reblog()` / `.unreblog()` | `MutationRepository.announce()` / `.undo()` | ActivityPods | `REUSE_BEHIND_ADAPTER` | ActivityPub Announce/Undo. Preserve optimistic UI but key by canonical object/activity IDs. |
-| Like / unlike | `.favourite()` / `.unfavourite()` | `MutationRepository.like()` / `.undo()` | ActivityPods | `REUSE_BEHIND_ADAPTER` | ActivityPub Like/Undo. |
-| Bookmark / unbookmark | `.bookmark()` / `.unbookmark()` | `CollectionRepository` or `PrivateDataRepository` | ActivityPods Pod | `REUSE_BEHIND_ADAPTER` | Bookmark is user-private state, not a federation mutation; best represented as Pod-owned collection/resource. |
-| Conversation mute | status `.mute()` / `.unmute()` | `ModerationRepository` | ActivityPods/Pod | `HARDEN_AND_EXPOSE` | Local-only conversation policy; must affect notifications/feed rendering consistently. |
-| Pin / unpin own post | status `.pin()` / `.unpin()` | `CollectionRepository` / profile metadata | ActivityPods | `REUSE_BEHIND_ADAPTER` | Model through actor featured/collection semantics where compatible. |
-| Native quote / quote revoke | quote status create + quote approval/revoke endpoints | `MutationRepository` + policy | ActivityPods | `HARDEN_AND_EXPOSE` | Requires exact quote/FEP semantics supported by current ActivityPods/SemApps stack; do not emulate as a plain link when native semantics are available. |
-| Media upload | `v2.media.create({file,description})` | `MediaRepository` | ActivityPods `semapps:File` + media pipeline | `HARDEN_AND_EXPOSE` | Backend processing exists. Browser-safe create/upload contract still needs exact endpoint/request/response definition. |
-| Poll create/update | fields embedded in status compose params | `MutationRepository` | ActivityPods | `HARDEN_AND_EXPOSE` | Must verify current ActivityStreams Question support and voting mutation path. |
-| Scheduled post | Mastodon scheduled status capability | `MutationRepository` / scheduling capability | TBD | `DEFERRED` until authority verified | Do not invent a client timer. If retained, scheduling must be server-authoritative and durable. |
-| Notifications snapshot | v1/v2 notifications list + grouping | `NotificationRepository` | ActivityPods authoritative state + safe projection | `HARDEN_AND_EXPOSE` | Preserve grouped notification UX independently from Mastodon response shapes. |
-| Notification read marker | `markers.create({notifications:{lastReadId}})` | `NotificationRepository.markRead()` | ActivityPods Pod | `NEW_WORK` or existing-resource reuse after audit | Should be portable user state; not tied to Mastodon marker IDs. |
-| Follow requests | `followRequests.list()` + accept/reject UI | `RelationshipRepository` | ActivityPods | `REUSE_BEHIND_ADAPTER` | Canonical incoming Follow acceptance/rejection semantics. |
-| Notification policy/requests | Mastodon v2 notification policy/requests | `ModerationRepository` + `NotificationRepository` | ActivityPods/Pod | `HARDEN_AND_EXPOSE` | Map into local portable notification policy rather than copying Mastodon DTOs. |
-| Notification realtime badge | current streaming/poll-driven state | `PrivateHintSource` | ActivityPods private emitter -> FEP-3ab2 | `REUSE_BEHIND_ADAPTER` | `notifications` topic is a refresh hint; authoritative notification query remains recovery path. |
-| Public realtime | Mastodon WS user stream | `PublicLiveSource` | sidecar FEP-3ab2 | `REUSE_BEHIND_ADAPTER` / `HARDEN_AND_EXPOSE` | Public FEP routes are implemented and wired. Bounded Redis replay exists; long-gap recovery policy still to qualify. |
-| Pod/resource realtime | none equivalent in Mastodon | `PodLiveSource` | Solid Notifications | `REUSE_BEHIND_ADAPTER` | Used for Pod-owned preference/collection/custom-feed-definition/resource synchronization. |
+| Login/session | OAuth app registration + authorize/token/revoke | `SessionRepository` | ActivityPods + Solid/Data Interoperability | `REUSE_BEHIND_ADAPTER` | Adapt SemApps browser OAuth/OIDC behavior; discover WebID authorization agent; obtain/verify app registration and grants. Do not import React Admin/MUI UI. |
+| Current account | `verifyCredentials()` | `SessionRepository`, `IdentityRepository` | ActivityPods | `REUSE_BEHIND_ADAPTER` | Canonical ID is WebID/actor URI, not Mastodon numeric ID. |
+| Preferences | Mastodon preferences + local state | `PrivateDataRepository` | ActivityPods Pod | `REUSE_BEHIND_ADAPTER` | Store portable user-owned preference state in Pod resources; browser cache is secondary. |
+| Home snapshot | `timelines.home.list()` | `FeedRepository` | sidecar public feed + ActivityPods private reads | `HARDEN_AND_EXPOSE` | Public followed projection plus authorized restricted/private reads; deterministic visibility-safe merge. |
+| Home refresh | `since_id` polling | `FeedRepository.refresh()` | same | `REUSE_BEHIND_ADAPTER` | Snapshot refresh/fallback remains available when live is absent. |
+| Home live | Mastodon user stream | `LiveRepository` | FEP-3ab2 + ActivityPods | `REUSE_BEHIND_ADAPTER` | Public FEP events, principal-scoped personal hints, Solid Notifications resource sync are distinct sources. |
+| Search | Mastodon v2 search with `resolve` | `SearchRepository` | sidecar public search + ActivityPods/WebFinger | `HARDEN_AND_EXPOSE` | Existing index/search implementation needs browser facade; combine actor resolution and hydration without exposing OpenSearch/Qdrant. |
+| Relationship read | `relationships.fetch()` | `RelationshipRepository` | ActivityPods | `REUSE_BEHIND_ADAPTER` | Viewer bound from authenticated session; return protocol-neutral state. |
+| Follow | `follow()` | `RelationshipRepository` | ActivityPods actor outbox | `REUSE_BEHIND_ADAPTER` | Submit canonical `Follow`. |
+| Unfollow/withdraw | `unfollow()` | `RelationshipRepository` | ActivityPods actor outbox | `REUSE_BEHIND_ADAPTER` | Submit canonical `Undo` of Follow. |
+| Accept/reject follow request | follow-request endpoints | `RelationshipRepository` | ActivityPods actor outbox | `REUSE_BEHIND_ADAPTER` | Canonical `Accept`/`Reject`. |
+| Follow presentation prefs | `notify`, `reblogs` | `PrivateDataRepository` | ActivityPods Pod | `HARDEN_AND_EXPOSE` | User-private presentation policy, not blindly encoded as Follow wire fields. |
+| Block/unblock | account block endpoints | `ModerationRepository`, `RelationshipRepository` | ActivityPods | `REUSE_BEHIND_ADAPTER` | ActivityPods has concrete blocked collections and Block handling; Undo reverses canonical relation. Enforce across reads/live. |
+| Mute/unmute | account mute endpoints | `ModerationRepository` | ActivityPods | `REUSE_BEHIND_ADAPTER` + policy work | ActivityPods has concrete muted collections; duration/notification-specific Mastodon semantics need portable policy fields. |
+| Remove follower | Mastodon remove follower | `RelationshipRepository` | ActivityPods | `HARDEN_AND_EXPOSE` | Define exact canonical relationship mutation/side effect rather than emulate Mastodon endpoint. |
+| Lists | Mastodon list CRUD/membership | `CollectionRepository` | ActivityPods collections | `REUSE_BEHIND_ADAPTER` | Use Collection/OrderedCollection URIs and membership operations. |
+| Bookmark | status bookmark | `CollectionRepository`/`PrivateDataRepository` | ActivityPods Pod | `REUSE_BEHIND_ADAPTER` | Private user-owned collection/resource; not federation activity. |
+| Create post | `statuses.create()` | `MutationRepository.createPost()` | ActivityPods actor outbox | `REUSE_BEHIND_ADAPTER` + idempotency work | POST bare AS object or Create activity to authenticated outbox. Must use durable `clientOperationId`; never retry as a new write. |
+| Reply | create status with reply ID | `MutationRepository.reply()` | ActivityPods actor outbox | `REUSE_BEHIND_ADAPTER` | Canonical AS object with `inReplyTo`, addressing and visibility. |
+| Edit | status update | `MutationRepository.updatePost()` | ActivityPods actor outbox/LDP | `REUSE_BEHIND_ADAPTER` | SemApps has `Update` object processing; verify Phanpy object-container permissions/edit-history presentation. |
+| Delete | status delete | `MutationRepository.deletePost()` | ActivityPods | `REUSE_BEHIND_ADAPTER` | Canonical `Delete`; preserve tombstone/cache ordering. |
+| Like/unlike | favourite/unfavourite | `MutationRepository` | ActivityPods | `REUSE_BEHIND_ADAPTER` | `Like` / `Undo`. |
+| Repost/unrepost | reblog/unreblog | `MutationRepository` | ActivityPods | `REUSE_BEHIND_ADAPTER` | `Announce` / `Undo`. |
+| Pin/profile feature | status/account pin | `CollectionRepository`/profile metadata | ActivityPods | `REUSE_BEHIND_ADAPTER` | Use actor featured/portable collection semantics where compatible. |
+| Conversation mute | status mute | `ModerationRepository` | ActivityPods Pod | `HARDEN_AND_EXPOSE` | Local conversation policy; must affect feed/notifications consistently. |
+| Quote | Mastodon quote/native quote APIs | `MutationRepository` | ActivityPods/SemApps | `NEW_WORK` / capability-gated | No current ActivityPods-specific native quote contract established. Do not degrade native quote semantics to a plain link silently. |
+| Poll create/vote | Mastodon poll fields/endpoints | `MutationRepository` | ActivityPods/SemApps | `NEW_WORK` / capability-gated | Generic AS support is not sufficient proof of deployed Question/vote semantics; verify container, permissions, vote side effects. |
+| Media upload | `v2.media.create()` | `MediaRepository` | ActivityPods `semapps:File` | `REUSE_BEHIND_ADAPTER` | POST raw File/Blob to discovered uploads container with MIME Content-Type; require `201` and canonical `Location` URI. Processing stays server-internal. |
+| Scheduled post | scheduled status | `MutationRepository` | server authority required | `DEFERRED` | Do not use browser timers for canonical scheduling. |
+| Notifications query | Mastodon notification list/grouping | `NotificationRepository` | ActivityPods + safe projection | `HARDEN_AND_EXPOSE` | Normalize social notification state independent of Mastodon DTO shape. |
+| Notification badge/live | Mastodon user stream/poll | `PrivateHintSource` | ActivityPods -> FEP | `REUSE_BEHIND_ADAPTER` | `notifications` is a principal-scoped refresh hint; authoritative query is recovery path. |
+| Notification read state | Mastodon markers | `NotificationRepository` | ActivityPods Pod | `NEW_WORK` / resource reuse | Portable read marker keyed to canonical notification identity, not Mastodon numeric marker IDs. |
+| Public realtime | Mastodon streaming | `PublicLiveSource` | sidecar FEP-3ab2 | `REUSE_BEHIND_ADAPTER` | Implemented control/SSE facade + bounded Redis replay. Long-gap recovery policy remains. |
+| Personal feed hint | Mastodon user stream | `PrivateHintSource` | ActivityPods -> FEP | `REUSE_BEHIND_ADAPTER` | `feeds/personal` triggers authoritative/safe refresh; not source of truth. |
+| Pod resource realtime | no direct Mastodon equivalent | `PodLiveSource` | Solid Notifications | `REUSE_BEHIND_ADAPTER` | Use SemApps WebSocketChannel2023 browser subscription behavior. |
 
-## Important current-code behaviors to preserve
+## Canonical outbox mapping
 
-### Home timeline
-
-Both Phanpy home variants:
-
-- paginate the Mastodon home timeline;
-- perform explicit `since_id` refresh checks;
-- save normalized statuses into shared state;
-- sort newest-first;
-- consume `status.update` and `delete` from the authenticated user stream;
-- mark deleted cached statuses rather than blindly removing all local references.
-
-The ActivityPods repository abstraction must preserve those observable behaviors even though snapshot and live transports change.
-
-### Optimistic social actions
-
-Phanpy optimistically updates like, boost, and bookmark state and rolls back on failure. This is valuable UI behavior and should remain above the repository boundary.
-
-The repository must return enough authoritative identity/state to reconcile optimistic changes without assuming Mastodon status IDs.
-
-### Composer idempotency
-
-New Mastodon posts are attempted with an `Idempotency-Key`, then Phanpy currently falls back to a request without that key if the first request fails.
-
-For ActivityPods, the fallback must **not** weaken idempotency. The ActivityPods mutation contract should accept a stable client operation ID and deduplicate retries at the authoritative mutation boundary. A generic retry must never create a second post.
-
-### Search mixes resolution and index search
-
-Phanpy's Mastodon search currently uses `resolve: authenticated`, allowing account resolution and indexed search to appear as one UI operation.
-
-The new `SearchRepository` should preserve one UX while internally composing:
-
-- public indexed search;
-- actor/WebFinger resolution;
-- authorized Pod/private search where appropriate;
-- relationship hydration for returned actors.
-
-### Relationship flags are not all protocol state
-
-Mastodon relationship objects combine:
-
-- federated relationship state (`following`, `followedBy`, `blocking`, requests);
-- local presentation/policy state (`showingReblogs`, `notifying`, mute durations, private notes, endorsement state).
-
-The ActivityPods domain model should not force all of these into one ActivityPub object. Federated state belongs to canonical ActivityPub relations; user-private preferences belong in Pod-owned policy/resources.
-
-## Current FEP-3ab2 implementation status
-
-The browser realtime facade is no longer merely architectural design.
-
-Current sidecar `main` contains:
-
-- concrete FEP-3ab2 Fastify control/subscription/SSE routes;
-- `Fep3ab2Runtime` startup wiring;
-- ActivityPods principal resolution/topic authorization integration;
-- Redis-backed stream tickets and subscription state;
-- principal-scoped private fan-out for `notifications` / `feeds/personal`;
-- a bounded Redis replay store for replayable **public** topics.
-
-Default replay settings in current startup are approximately:
+The existing SemApps ActivityPub stack already supplies the key social write behavior:
 
 ```text
-TTL: 900 seconds
-max replay events per topic/session window: 500
-max replay index size: 10,000
+Authenticated browser
+  -> actor outbox POST
+     -> bare AS object becomes Create when appropriate
+     -> Create / Update / Delete object side effects
+     -> Follow / Accept / Reject / Undo side effects
+     -> Like / Undo side effects
+     -> Announce / Undo side effects
+     -> ActivityPods local collections/policy side effects
+     -> native or external federation authority selected by ActivityPods
 ```
 
-The internal `DurableStreamSubscriptionService` may still advertise `replayCapable: false`; that does not mean browser FEP replay is absent. The correct Phase 9 question is now:
+Phanpy does not need a Mastodon-compatible REST server for these operations.
 
-> Is bounded FEP Redis replay plus snapshot fallback sufficient for the product recovery contract, or must an expired/long-gap cursor be reconstructed from RedPanda offsets/log retention?
+## Mutation idempotency contract
 
-Phase 9 must answer and test that question rather than rebuild FEP streaming.
+This must be added before ActivityPods mutations are production-safe for Phanpy.
 
-## Active feed registry status
+Every mutation repository method should take a stable operation identity, for example:
 
-Current federation-sidecar startup registers three concrete definitions, all backed by `search.candidates.v1` through either OpenSearch or Qdrant:
+```js
+await mutationRepository.createPost({
+  clientOperationId,
+  post
+});
+```
+
+Server requirements:
+
+- bind operation ID to authenticated actor and operation type;
+- persist payload digest and canonical result;
+- identical retry returns same canonical result;
+- conflicting reuse of an operation ID fails closed;
+- survive server restart/retry;
+- never issue a second federation handoff for the same canonical operation;
+- retain dedupe state for a documented bounded period.
+
+This replaces Phanpy's unsafe current pattern where a failed Mastodon create attempt can be retried without its idempotency header.
+
+## Home-feed behavior to preserve
+
+Current Phanpy home behavior includes:
+
+- paginated snapshot loading;
+- explicit refresh checks;
+- shared normalized status cache;
+- newest-first ordering;
+- live update/delete processing;
+- marking cached deleted objects instead of blindly losing every reference.
+
+The new repositories preserve those behaviors while changing transport/authority.
+
+## Optimistic actions to preserve
+
+Phanpy optimistically updates likes, boosts and bookmarks and rolls back on error. Keep that UI behavior above repository adapters.
+
+Reconciliation keys must use canonical object/activity URIs rather than Mastodon numeric IDs.
+
+## Search behavior to preserve
+
+Current Mastodon search combines indexed search and remote account resolution in one UX. `SearchRepository` should preserve that experience while composing:
+
+- public indexed lexical/semantic/hybrid search;
+- actor/WebFinger resolution;
+- authorized Pod/private search when appropriate;
+- relationship/moderation hydration.
+
+Current federation `DefaultPublicSearchService` exists but is not currently wired into a browser/public route. Its phase-era numeric `from` cursor should not become the final public contract.
+
+## FEP-3ab2 implementation status
+
+Current sidecar `main` includes:
+
+- concrete FEP control/subscription/SSE routes;
+- runtime startup wiring;
+- ActivityPods principal/topic authorization integration;
+- Redis-backed tickets/subscriptions;
+- principal-scoped private fan-out;
+- bounded Redis replay for public topics.
+
+The internal feed stream's `replayCapable: false` is not proof that FEP browser replay is absent.
+
+The remaining Phase 9 contract is expired/long-gap recovery beyond the bounded Redis replay window: snapshot fallback only, or RedPanda-backed longer replay if justified.
+
+## Active feed registry
+
+Current sidecar startup registers:
 
 1. `urn:activitypods:feed:public-discovery:v1`
-   - discovery
-   - public
-   - Stream2 + canonical + unified
-   - ranked
 2. `urn:activitypods:feed:graph-personalized:v1`
-   - graph
-   - authenticated
-   - Stream1 + Stream2 + canonical + unified
-   - blended
 3. `urn:activitypods:feed:topic:v1`
-   - topic
-   - public
-   - Stream2 + canonical + unified
-   - blended
 
-The contract type supports `custom`, but no concrete custom-feed compiler/provider is currently registered on `main`. Phase 12 therefore has real new provider/compiler work; it should reuse the existing feed contract/registry and ActivityPods collections rather than create another feed engine.
+The feed contract supports `custom`, but no concrete custom compiler/provider is currently registered on `main`. Phase 12 adds that inside the existing feed architecture.
 
-## Phase 1 repository seam implied by this audit
+## Moderation boundary
 
-Because Phanpy is JavaScript/JSX, Phase 1 should introduce plain JS modules with strong JSDoc contracts rather than silently converting the app to TypeScript.
+ActivityPods already has actor blocked/muted collections, but current generic feed/hydration services do not themselves prove retrieval/application of that viewer-specific state. Hydration contracts having `blocked`/`viewer_not_allowed` omission reasons is not equivalent to an implemented unified policy.
 
-Proposed seam:
+Phase 7/16 must establish one server-side policy path across feed, hydration, search, public live and discovery. Browser filtering is defense-in-depth only.
+
+## Phase 1 repository seam
+
+Keep Phanpy JavaScript/JSX. Introduce JS modules with strong JSDoc contracts rather than converting the app to TypeScript as part of this migration.
 
 ```text
 src/domain/
@@ -180,17 +184,14 @@ src/repositories/
   live.js
 ```
 
-Phase 2 then implements `mastodon/*` adapters over the existing `masto` calls with no visible behavior change. ActivityPods adapters can subsequently land capability-by-capability without protocol conditionals spreading through UI components.
+Phase 2 implements `mastodon/*` adapters first, preserving current behavior. ActivityPods adapters then land capability-by-capability without protocol branches spreading through components.
 
-## Remaining Phase 0 operation gaps
+## Remaining Phase 0 operation decisions
 
-Before calling Phase 0 complete, verify:
-
-1. exact ActivityPods browser OIDC/session primitive and token-restoration lifecycle;
-2. exact ActivityPods client-facing mutation shapes for Create/Reply/Update/Delete/Follow/Undo/Like/Announce/Block and incoming Follow decisions;
-3. exact Solid Notifications browser discovery/subscription/reconnect semantics in the pinned SemApps version;
-4. exact browser `semapps:File` upload endpoint/shape;
-5. quote, poll and edit support in the current ActivityPods/SemApps ActivityPub stack;
-6. moderation enforcement equivalence across feed query, hydration, search, public FEP delivery, private hints and authoritative reads;
-7. public search façade exposure;
-8. FEP expired-cursor recovery policy beyond the bounded Redis replay window.
+1. authoritative client-operation idempotency implementation;
+2. native quote contract/capability policy;
+3. poll Question/voting contract/capability policy;
+4. exact browser-safe feed/hydration/search facade shape and authenticated viewer binding;
+5. unified viewer moderation policy across projection/live surfaces;
+6. FEP long-gap recovery policy;
+7. final ActivityPods AccessNeedGroup/DataGrant/special-right manifest requested by Phanpy.
