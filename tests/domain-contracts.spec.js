@@ -1,6 +1,10 @@
 import { expect, test } from '@playwright/test';
 
-import { domainKey, isPublicVisibility } from '../src/domain/model.js';
+import {
+  domainKey,
+  isPublicVisibility,
+  mutationOperationId,
+} from '../src/domain/model.js';
 import {
   REPOSITORY_METHODS,
   assertRepositorySet,
@@ -45,6 +49,18 @@ test.describe('domain model contracts', () => {
     expect(isPublicVisibility('private')).toBe(false);
     expect(isPublicVisibility('unknown')).toBe(false);
   });
+
+  test('requires a stable client operation id for canonical mutations', () => {
+    expect(
+      mutationOperationId({ clientOperationId: ' post-create:01JEXAMPLE ' }),
+    ).toBe('post-create:01JEXAMPLE');
+    expect(() => mutationOperationId({})).toThrow(
+      'Mutation context requires clientOperationId',
+    );
+    expect(() =>
+      mutationOperationId({ clientOperationId: 'x'.repeat(257) }),
+    ).toThrow('clientOperationId exceeds 256 characters');
+  });
 });
 
 test.describe('repository contracts', () => {
@@ -54,6 +70,14 @@ test.describe('repository contracts', () => {
 
     const composed = createRepositorySet(repositories);
     expect(Object.isFrozen(composed)).toBe(true);
+  });
+
+  test('requires a separate moderation authority boundary', () => {
+    const repositories = makeRepositorySet();
+    delete repositories.moderation;
+    expect(() => assertRepositorySet(repositories)).toThrow(
+      'Missing moderation repository',
+    );
   });
 
   test('fails fast when a repository is missing', () => {
@@ -69,6 +93,22 @@ test.describe('repository contracts', () => {
     delete repositories.feeds.query;
     expect(() => assertRepositorySet(repositories)).toThrow(
       'feeds repository is missing query()',
+    );
+  });
+
+  test('requires session capability resolution', () => {
+    const repositories = makeRepositorySet();
+    delete repositories.session.capabilities;
+    expect(() => assertRepositorySet(repositories)).toThrow(
+      'session repository is missing capabilities()',
+    );
+  });
+
+  test('requires incoming follow decision methods', () => {
+    const repositories = makeRepositorySet();
+    delete repositories.relationships.acceptFollow;
+    expect(() => assertRepositorySet(repositories)).toThrow(
+      'relationships repository is missing acceptFollow()',
     );
   });
 
