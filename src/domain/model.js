@@ -12,6 +12,32 @@
 /** @typedef {'stream1'|'stream2'|'canonical'|'firehose'|'unified'|'pod'|'mastodon'|'unknown'} FeedSource */
 /** @typedef {'deleted'|'blocked'|'viewer_not_allowed'|'not_found'|'invalid'|'unavailable'} HydrationOmissionReason */
 /** @typedef {'public'|'private_hint'|'pod'} LiveSourceKind */
+/** @typedef {'everyone'|'followers'|'mentioned'|'nobody'} ReplyPolicy */
+/** @typedef {'everyone'|'nobody'} QuotePolicy */
+
+/**
+ * Product-level capability names. Provider wire capability identifiers are
+ * mapped to these values by the session adapter; UI code must never branch on
+ * raw provider capability strings.
+ * @typedef {'post_create'|'post_edit'|'post_delete'|'quote_create'|'quote_authorize'|'poll_create'|'poll_vote'|'media_upload'|'custom_feeds'|'public_realtime'|'private_realtime'|'pod_realtime'} DomainCapability
+ */
+
+export const DOMAIN_CAPABILITIES = Object.freeze({
+  POST_CREATE: 'post_create',
+  POST_EDIT: 'post_edit',
+  POST_DELETE: 'post_delete',
+  QUOTE_CREATE: 'quote_create',
+  QUOTE_AUTHORIZE: 'quote_authorize',
+  POLL_CREATE: 'poll_create',
+  POLL_VOTE: 'poll_vote',
+  MEDIA_UPLOAD: 'media_upload',
+  CUSTOM_FEEDS: 'custom_feeds',
+  PUBLIC_REALTIME: 'public_realtime',
+  PRIVATE_REALTIME: 'private_realtime',
+  POD_REALTIME: 'pod_realtime',
+});
+
+const DOMAIN_CAPABILITY_VALUES = new Set(Object.values(DOMAIN_CAPABILITIES));
 
 /**
  * Stable identity that survives projection/provider changes.
@@ -32,6 +58,55 @@
  * @typedef {Object} MutationContext
  * @property {string} clientOperationId
  * @property {string=} expectedRevision Optimistic-concurrency token when supported.
+ */
+
+/**
+ * Cross-protocol interaction policy. Defaults are provider-defined when absent.
+ * @typedef {Object} DomainInteractionPolicy
+ * @property {ReplyPolicy=} canReply
+ * @property {QuotePolicy=} canQuote
+ */
+
+/**
+ * Protocol-neutral post creation/edit input. `quoteOfKey` is a semantic quote,
+ * not a URL pasted into content. Adapters must fail rather than silently degrade
+ * a quote into an ordinary hyperlink when quote capability is unavailable.
+ * @typedef {Object} PostDraft
+ * @property {string} contentText
+ * @property {Visibility} visibility
+ * @property {string=} spoilerText
+ * @property {string=} language
+ * @property {string=} replyToKey
+ * @property {string=} quoteOfKey
+ * @property {string[]=} mediaIds
+ * @property {boolean=} sensitive
+ * @property {DomainInteractionPolicy=} interactionPolicy
+ */
+
+/**
+ * Protocol-neutral poll creation input. It intentionally follows product
+ * semantics while adapters translate `single`/`multiple` to native oneOf/anyOf
+ * or equivalent protocol representations.
+ * @typedef {Object} PollDraft
+ * @property {string} question
+ * @property {'single'|'multiple'} mode
+ * @property {string[]} options
+ * @property {Visibility} visibility
+ * @property {string=} closesAt ISO-8601 close time.
+ * @property {string=} language
+ * @property {string=} spoilerText
+ * @property {DomainInteractionPolicy=} interactionPolicy
+ */
+
+/**
+ * A poll vote uses the canonical poll identity plus option name because the
+ * current canonical FEP-9967 contract identifies the selected option by name.
+ * Multi-choice voting is represented by one or more names in one user action;
+ * adapters are responsible for protocol-specific emission while preserving one
+ * MutationContext for the logical user operation.
+ * @typedef {Object} PollVoteInput
+ * @property {string} pollKey
+ * @property {string[]} optionNames
  */
 
 /**
@@ -212,7 +287,7 @@
  * @property {string=} applicationUri
  * @property {string=} providerBaseUrl
  * @property {string=} expiresAt
- * @property {string[]=} capabilities
+ * @property {DomainCapability[]} capabilities Product-level capabilities after adapter normalization.
  */
 
 /**
@@ -235,6 +310,27 @@
  * @property {() => void} close
  * @property {Promise<void>=} ready
  */
+
+/**
+ * @param {unknown} value
+ * @returns {value is DomainCapability}
+ */
+export function isDomainCapability(value) {
+  return typeof value === 'string' && DOMAIN_CAPABILITY_VALUES.has(value);
+}
+
+/**
+ * @param {DomainSession|DomainCapability[]|null|undefined} sessionOrCapabilities
+ * @param {DomainCapability} capability
+ * @returns {boolean}
+ */
+export function hasDomainCapability(sessionOrCapabilities, capability) {
+  if (!isDomainCapability(capability)) return false;
+  const capabilities = Array.isArray(sessionOrCapabilities)
+    ? sessionOrCapabilities
+    : sessionOrCapabilities?.capabilities;
+  return Array.isArray(capabilities) && capabilities.includes(capability);
+}
 
 /**
  * Return a normalized canonical key for dedupe/cache indexing. This helper is
