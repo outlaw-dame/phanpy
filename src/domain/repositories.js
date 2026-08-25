@@ -1,6 +1,6 @@
 // Repository contracts are deliberately transport- and protocol-neutral.
 // Adapters may use Mastodon REST/streaming, ActivityPods/Solid, the Mastopod
-// browser gateway, or future protocol backends without leaking those DTOs into UI.
+// browser gateway, or future protocol backends without leaking wire DTOs into UI.
 
 /** @typedef {import('./model.js').DomainActor} DomainActor */
 /** @typedef {import('./model.js').DomainPost} DomainPost */
@@ -8,12 +8,15 @@
 /** @typedef {import('./model.js').DomainRelationship} DomainRelationship */
 /** @typedef {import('./model.js').DomainNotification} DomainNotification */
 /** @typedef {import('./model.js').DomainCollection} DomainCollection */
+/** @typedef {import('./model.js').DomainMedia} DomainMedia */
 /** @typedef {import('./model.js').CustomFeedDefinition} CustomFeedDefinition */
 /** @typedef {import('./model.js').FeedPage} FeedPage */
 /** @typedef {import('./model.js').FeedQuery} FeedQuery */
 /** @typedef {import('./model.js').HydrationResult} HydrationResult */
 /** @typedef {import('./model.js').LiveEnvelope} LiveEnvelope */
 /** @typedef {import('./model.js').LiveSubscription} LiveSubscription */
+/** @typedef {import('./model.js').MutationContext} MutationContext */
+/** @typedef {import('./model.js').LiveSourceKind} LiveSourceKind */
 
 /**
  * @typedef {Object} SessionRepository
@@ -21,6 +24,7 @@
  * @property {(input: object) => Promise<DomainSession>} login
  * @property {() => Promise<void>} logout
  * @property {() => Promise<DomainSession|null>} current
+ * @property {() => Promise<string[]>} capabilities
  */
 
 /**
@@ -31,14 +35,29 @@
  */
 
 /**
+ * Federated relationship state. Viewer-private presentation preferences belong
+ * in ModerationRepository / provider-private settings, not this wire-shaped state.
  * @typedef {Object} RelationshipRepository
  * @property {(actorKey: string) => Promise<DomainRelationship>} get
- * @property {(actorKey: string) => Promise<DomainRelationship>} follow
- * @property {(actorKey: string) => Promise<DomainRelationship>} unfollow
- * @property {(actorKey: string) => Promise<DomainRelationship>} block
- * @property {(actorKey: string) => Promise<DomainRelationship>} unblock
- * @property {(actorKey: string) => Promise<DomainRelationship>} mute
- * @property {(actorKey: string) => Promise<DomainRelationship>} unmute
+ * @property {(actorKey: string, context: MutationContext) => Promise<DomainRelationship>} follow
+ * @property {(actorKey: string, context: MutationContext) => Promise<DomainRelationship>} unfollow
+ * @property {(actorKey: string, context: MutationContext) => Promise<DomainRelationship>} block
+ * @property {(actorKey: string, context: MutationContext) => Promise<DomainRelationship>} unblock
+ * @property {(actorKey: string, context: MutationContext) => Promise<DomainRelationship>} acceptFollow
+ * @property {(actorKey: string, context: MutationContext) => Promise<DomainRelationship>} rejectFollow
+ */
+
+/**
+ * User-owned moderation/presentation policy. Implementations must apply these
+ * decisions server-side to feed/hydration/search/live where applicable; UI-only
+ * filtering is not an acceptable authority boundary.
+ * @typedef {Object} ModerationRepository
+ * @property {(actorKey: string, options?: {durationSeconds?: number, notifications?: boolean}) => Promise<void>} muteActor
+ * @property {(actorKey: string) => Promise<void>} unmuteActor
+ * @property {(conversationKey: string, options?: {durationSeconds?: number}) => Promise<void>} muteConversation
+ * @property {(conversationKey: string) => Promise<void>} unmuteConversation
+ * @property {(actorKey: string) => Promise<boolean>} isActorMuted
+ * @property {(actorKey: string) => Promise<boolean>} isActorBlocked
  */
 
 /**
@@ -55,16 +74,19 @@
  */
 
 /**
+ * Every canonical mutation takes MutationContext. `clientOperationId` is created
+ * before the first network attempt and reused for all retries; adapters MUST NOT
+ * silently retry without it.
  * @typedef {Object} MutationRepository
- * @property {(input: object) => Promise<DomainPost>} createPost
- * @property {(postKey: string, input: object) => Promise<DomainPost>} editPost
- * @property {(postKey: string) => Promise<void>} deletePost
- * @property {(postKey: string) => Promise<DomainPost>} like
- * @property {(postKey: string) => Promise<DomainPost>} unlike
- * @property {(postKey: string) => Promise<DomainPost>} repost
- * @property {(postKey: string) => Promise<DomainPost>} unrepost
- * @property {(postKey: string) => Promise<DomainPost>} bookmark
- * @property {(postKey: string) => Promise<DomainPost>} unbookmark
+ * @property {(input: object, context: MutationContext) => Promise<DomainPost>} createPost
+ * @property {(postKey: string, input: object, context: MutationContext) => Promise<DomainPost>} editPost
+ * @property {(postKey: string, context: MutationContext) => Promise<void>} deletePost
+ * @property {(postKey: string, context: MutationContext) => Promise<DomainPost>} like
+ * @property {(postKey: string, context: MutationContext) => Promise<DomainPost>} unlike
+ * @property {(postKey: string, context: MutationContext) => Promise<DomainPost>} repost
+ * @property {(postKey: string, context: MutationContext) => Promise<DomainPost>} unrepost
+ * @property {(postKey: string, context: MutationContext) => Promise<DomainPost>} bookmark
+ * @property {(postKey: string, context: MutationContext) => Promise<DomainPost>} unbookmark
  */
 
 /**
@@ -97,14 +119,22 @@
  */
 
 /**
+ * `upload` returns the protocol-neutral media object whose id should be the
+ * canonical resource URI when the provider exposes one (ActivityPods semapps:File
+ * `Location`, Mastodon media ID normalized by its adapter, etc.).
  * @typedef {Object} MediaRepository
- * @property {(file: File|Blob, options?: object) => Promise<object>} upload
+ * @property {(file: File|Blob, options?: object) => Promise<DomainMedia>} upload
  * @property {(mediaId: string) => Promise<void>} remove
  */
 
 /**
+ * Realtime has three semantically distinct sources even if an adapter multiplexes
+ * them over one network connection:
+ *   public       -> public feed/object events
+ *   private_hint -> principal-scoped refresh/invalidation hints
+ *   pod          -> user-owned resource synchronization
  * @typedef {Object} LiveRepository
- * @property {(topics: string[], handlers: {onEvent: (event: LiveEnvelope) => void, onError?: (error: Error) => void}, options?: object) => Promise<LiveSubscription>} subscribe
+ * @property {(source: LiveSourceKind, topics: string[], handlers: {onEvent: (event: LiveEnvelope) => void, onError?: (error: Error) => void}, options?: object) => Promise<LiveSubscription>} subscribe
  */
 
 /**
@@ -112,6 +142,7 @@
  * @property {SessionRepository} session
  * @property {IdentityRepository} identity
  * @property {RelationshipRepository} relationships
+ * @property {ModerationRepository} moderation
  * @property {FeedRepository} feeds
  * @property {HydrationRepository} hydration
  * @property {MutationRepository} mutations
@@ -124,7 +155,7 @@
  */
 
 export const REPOSITORY_METHODS = Object.freeze({
-  session: ['restore', 'login', 'logout', 'current'],
+  session: ['restore', 'login', 'logout', 'current', 'capabilities'],
   identity: ['currentActor', 'getActor', 'searchActors'],
   relationships: [
     'get',
@@ -132,8 +163,16 @@ export const REPOSITORY_METHODS = Object.freeze({
     'unfollow',
     'block',
     'unblock',
-    'mute',
-    'unmute',
+    'acceptFollow',
+    'rejectFollow',
+  ],
+  moderation: [
+    'muteActor',
+    'unmuteActor',
+    'muteConversation',
+    'unmuteConversation',
+    'isActorMuted',
+    'isActorBlocked',
   ],
   feeds: ['query', 'definitions'],
   hydration: ['hydrate', 'getPost'],
@@ -157,7 +196,7 @@ export const REPOSITORY_METHODS = Object.freeze({
 });
 
 /**
- * Fail fast if an adapter wiring is incomplete. This keeps protocol-specific
+ * Fail fast if adapter wiring is incomplete. This keeps protocol-specific
  * fallbacks from leaking into components when a repository is forgotten.
  *
  * @param {Partial<RepositorySet>} repositories
