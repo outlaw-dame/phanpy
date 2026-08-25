@@ -11,7 +11,9 @@ function makeRepositorySet() {
   return Object.fromEntries(
     Object.entries(REPOSITORY_METHODS).map(([name, methods]) => [
       name,
-      Object.fromEntries(methods.map((method) => [method, async () => undefined])),
+      Object.fromEntries(
+        methods.map((method) => [method, async () => undefined]),
+      ),
     ]),
   );
 }
