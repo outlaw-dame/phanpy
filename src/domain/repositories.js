@@ -126,7 +126,15 @@
 export const REPOSITORY_METHODS = Object.freeze({
   session: ['restore', 'login', 'logout', 'current'],
   identity: ['currentActor', 'getActor', 'searchActors'],
-  relationships: ['get', 'follow', 'unfollow', 'block', 'unblock', 'mute', 'unmute'],
+  relationships: [
+    'get',
+    'follow',
+    'unfollow',
+    'block',
+    'unblock',
+    'mute',
+    'unmute',
+  ],
   feeds: ['query', 'definitions'],
   hydration: ['hydrate', 'getPost'],
   mutations: [
@@ -156,7 +164,10 @@ export const REPOSITORY_METHODS = Object.freeze({
  * @param {{allowPartial?: boolean}=} options
  * @returns {RepositorySet|Partial<RepositorySet>}
  */
-export function assertRepositorySet(repositories, { allowPartial = false } = {}) {
+export function assertRepositorySet(
+  repositories,
+  { allowPartial = false } = {},
+) {
   if (!repositories || typeof repositories !== 'object') {
     throw new TypeError('Repository set must be an object');
   }
